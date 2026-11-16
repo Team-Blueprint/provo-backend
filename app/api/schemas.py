@@ -7,11 +7,25 @@ from app.core.enums import DayStatus, JobStatus, TradeType
 
 
 # --- Auth Schemas ---
+class WorkerSignupRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(..., min_length=2, max_length=150)
+    phone: str = Field(..., description="Phone number in national or E.164 format")
+    trade: TradeType = Field(..., description="Artisan track (e.g. BRICKLAYING, PLUMBING, etc.)")
+
+
+class ClientSignupRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(..., min_length=2, max_length=150)
+    phone: str = Field(..., description="Phone number in national or E.164 format")
+
+
 class SignupRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str = Field(..., min_length=2, max_length=150)
     phone: str = Field(..., description="Phone number in national or E.164 format")
     role: str = Field("worker", description="'worker' or 'client'")
+    trade: TradeType | None = Field(None, description="Artisan track if role is worker")
 
 
 class LoginRequest(BaseModel):
@@ -89,3 +103,17 @@ class JobResponse(BaseModel):
     paga_payment_url: str | None = None
     paga_account_number: str | None = None
     days_schedule: list[JobDayResponse] = []
+
+
+class DisputeRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class ReceiptResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    receipt_number: str
+    job_id: uuid.UUID
+    issued_at: Any
+    receipt_data: dict[str, Any]

@@ -1,7 +1,11 @@
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Explicitly load .env into environment
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -25,17 +29,17 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./proofwork.db"
 
-    PROOFWORK_HMAC_SECRET: str = "b8c8d8b9f074a382e753f20d91d60ea54e3cb7a8b417df8b53298a4421b93f21"
-    JWT_SECRET_KEY: str = "7d44933a39e80cbb0c741e3d06283b928f6e4a2c0f2095f70b7410c572b8344e"
+    # Core Security & JWT Auth (loaded from .env)
+    PROOFWORK_HMAC_SECRET: str = ""
+    JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200  # 30 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200
     OTP_EXPIRE_MINUTES: int = 5
     OTP_MAX_ATTEMPTS: int = 5
 
     BASE_URL: str = "http://localhost:8000"
 
     # Auto-release window for daily escrow
-    # 24 hours in production; can be set e.g. 0.033 (2 minutes) for demos
     AUTO_RELEASE_WINDOW_HOURS: float = 24.0
 
     # Telegram Bot Configuration
@@ -43,19 +47,19 @@ class Settings(BaseSettings):
     TELEGRAM_WEBHOOK_SECRET: str = ""
     TELEGRAM_BOT_USERNAME: str = "proofwork_bot"
 
-    # Paga Configuration
+    # Paga Configuration (Your 3 Paga keys: Public, Secret, Hash)
     PAGA_USE_MOCK: bool = True
     PAGA_SANDBOX_BASE_URL: str = "https://beta.mypaga.com/paga-webservices/business-rest"
-    PAGA_PRINCIPAL: str = ""
-    PAGA_CREDENTIALS: str = ""
-    PAGA_API_KEY: str = ""
-    PAGA_HMAC_KEY: str = ""
+    PAGA_PUBLIC_KEY: str = ""
+    PAGA_SECRET_KEY: str = ""
+    PAGA_HASH_KEY: str = ""
 
     # httpSMS Configuration
     HTTPSMS_API_KEY: str = ""
     HTTPSMS_SENDER_PHONE: str = ""
     HTTPSMS_SIGNING_KEY: str = ""
 
+    # WhatsApp Configuration (Simulated / Secondary)
     WHATSAPP_TOKEN: str = ""
     WHATSAPP_PHONE_NUMBER_ID: str = ""
     WHATSAPP_VERIFY_TOKEN: str = ""

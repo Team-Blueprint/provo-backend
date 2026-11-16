@@ -31,6 +31,7 @@ class AuthService:
         name: str,
         phone: str,
         role: str = "worker",  # "worker" or "client"
+        trade: str | None = None,
     ) -> AuthOTP:
         """
         Initiates passwordless registration:
@@ -60,9 +61,12 @@ class AuthService:
             db.add(user)
             await db.flush()
 
-            # Attach initial empty profile for extensibility
+            # Attach initial profile with trade for workers
             if is_worker:
-                profile = WorkerProfile(user_id=user.id)
+                profile = WorkerProfile(
+                    user_id=user.id,
+                    trade=trade.strip() if trade else "OTHER",
+                )
                 db.add(profile)
             elif is_client:
                 c_profile = ClientProfile(user_id=user.id)
@@ -70,6 +74,8 @@ class AuthService:
             await db.flush()
         else:
             user.name = clean_name
+            if is_worker and trade and user.worker_profile:
+                user.worker_profile.trade = trade.strip()
             await db.flush()
 
         return await self._create_and_send_otp(

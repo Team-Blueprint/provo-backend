@@ -22,14 +22,13 @@ class RealPagaAdapter(PagaAdapter):
 
     def __init__(self) -> None:
         self.base_url = settings.PAGA_SANDBOX_BASE_URL.rstrip("/")
-        self.principal = settings.PAGA_PRINCIPAL
-        self.credentials = settings.PAGA_CREDENTIALS
-        self.api_key = settings.PAGA_API_KEY
-        self.hmac_key = settings.PAGA_HMAC_KEY
+        self.public_key = settings.PAGA_PUBLIC_KEY
+        self.secret_key = settings.PAGA_SECRET_KEY
+        self.hash_key = settings.PAGA_HASH_KEY
 
     def _compute_hash(self, *values: Any) -> str:
-        """Concatenates parameters with HMAC key and returns SHA-512 hex digest."""
-        raw_concat = "".join(str(v) for v in values) + self.hmac_key
+        """Concatenates parameters with Hash Key and returns SHA-512 hex digest."""
+        raw_concat = "".join(str(v) for v in values) + self.hash_key
         return hashlib.sha512(raw_concat.encode("utf-8")).hexdigest()
 
     async def create_escrow_payment_request(
@@ -64,8 +63,8 @@ class RealPagaAdapter(PagaAdapter):
         }
 
         headers = {
-            "principal": self.principal,
-            "credentials": self.credentials,
+            "principal": self.public_key,
+            "credentials": self.secret_key,
             "hash": auth_hash,
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -114,8 +113,8 @@ class RealPagaAdapter(PagaAdapter):
         }
 
         headers = {
-            "principal": self.principal,
-            "credentials": self.credentials,
+            "principal": self.public_key,
+            "credentials": self.secret_key,
             "hash": auth_hash,
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -140,9 +139,9 @@ class RealPagaAdapter(PagaAdapter):
         raw_body: bytes,
         signature: str,
     ) -> bool:
-        if not self.hmac_key:
-            logger.warning("PAGA_HMAC_KEY not set; webhook signature verification failed.")
+        if not self.hash_key:
+            logger.warning("PAGA_HASH_KEY not set; webhook signature verification failed.")
             return False
 
-        computed = hmac.new(self.hmac_key.encode("utf-8"), raw_body, hashlib.sha512).hexdigest()
+        computed = hmac.new(self.hash_key.encode("utf-8"), raw_body, hashlib.sha512).hexdigest()
         return hmac.compare_digest(computed.lower(), signature.strip().lower())

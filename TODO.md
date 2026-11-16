@@ -91,60 +91,60 @@
 ---
 
 ## Phase 4: Work-Day Lifecycle & Release Services (`app/services/`)
-- [ ] Worker "Done" Trigger (`POST /jobs/{id}/days/{n}/done`):
+- [x] Worker "Done" Trigger (`POST /jobs/{id}/days/{n}/done`):
   - Mark day `DONE_REPORTED`, record `done_at`
   - Compute `release_at = done_at + 24 hours` (configurable duration via env, e.g. 2 minutes for demo)
   - Notify client and supervisor via Telegram
-- [ ] Client / Supervisor Confirmation (`POST /jobs/{id}/days/{n}/confirm`):
+- [x] Client / Supervisor Confirmation (`POST /jobs/{id}/days/{n}/confirm`):
   - Validate actor is job's client or assigned supervisor
   - Validate day is in `DONE_REPORTED` and within release window
   - Transition day to `CONFIRMED`
   - In same DB transaction: Create `payouts` row (outbox pattern) and write `RELEASED` ledger entry
   - Trigger Paga payout $\rightarrow$ transition day to `PAID`
-- [ ] Client / Supervisor Dispute (`POST /jobs/{id}/days/{n}/dispute`):
+- [x] Client / Supervisor Dispute (`POST /jobs/{id}/days/{n}/dispute`):
   - Validate actor authorization
   - Transition day to `DISPUTED`, freeze 24h countdown, create `disputes` record
-- [ ] Job Completion & Receipt Minting:
+- [x] Job Completion & Receipt Minting:
   - When all days are settled, transition job to `COMPLETED`
   - Mint official Proofwork Receipt (`PW-YYYY-XXXX`) and save metadata
 
 ---
 
 ## Phase 5: Background Scheduler & Payout Outbox (`app/workers/`)
-- [ ] Background Auto-Release Worker:
+- [x] Background Auto-Release Worker:
   - Periodic polling task checking for `DONE_REPORTED` days where `now >= release_at`
   - Lock candidate days using `SELECT ... FOR UPDATE SKIP LOCKED`
   - Transition day to `AUTO_RELEASED`
   - Queue payout in outbox, write `RELEASED` ledger entry, and trigger disbursement
-- [ ] 12-Hour Midpoint Reminder:
+- [x] 12-Hour Midpoint Reminder:
   - Send Telegram/SMS reminder to client and supervisor at 12 hours remaining
-- [ ] Payout Outbox Dispatcher:
+- [x] Payout Outbox Dispatcher:
   - Processes pending payouts with retry backoff and idempotency protection
-- [ ] Ledger Reconciliation Command:
+- [x] Ledger Reconciliation Command:
   - CLI/script checking that ledger balances match payout and refund statuses
 
 ---
 
 ## Phase 6: Telegram Bot Integration (`aiogram 3`) (`app/integrations/telegram/`)
-- [ ] Mount `aiogram 3` webhook inside FastAPI at `POST /webhooks/telegram` with secret token header
-- [ ] User Onboarding & Identity:
+- [x] Mount `aiogram 3` webhook inside FastAPI at `POST /webhooks/telegram` with secret token header
+- [x] User Onboarding & Identity:
   - Telegram share-contact button to get verified E.164 phone number
-  - Register as Client or Worker (set payout Paga account)
-- [ ] Client Flow:
+  - Register as Client or Worker with trade selection for artisan track
+- [x] Client Flow:
   - Menu: "New Job", "My Jobs", "Confirm Pending"
   - Interactive job creation: Pick trade from button list $\rightarrow$ Enter description $\rightarrow$ Enter total amount & days
   - Pick artisan from directory OR enter worker phone to invite
   - Bot returns one-time Paga payment link and account number
   - Optional: Assign supervisor by phone or Telegram ID
-- [ ] Worker Flow:
+- [x] Worker Flow:
   - Menu: "My Active Jobs", "Done Today", "My Income Record"
   - View job details with locked escrow badge
   - Click "Done Today" on active work day $\rightarrow$ starts 24h window
-- [ ] Supervisor / Client Review Flow:
+- [x] Supervisor / Client Review Flow:
   - Instant notification when worker reports "done"
   - Inline buttons: [✅ Confirm Day Pay] [⚠️ Dispute Work]
   - Secure opaque callback tokens verifying user authorization
-- [ ] SMS Invitation Deep Link Handling:
+- [x] SMS Invitation Deep Link Handling:
   - If artisan or supervisor is invited by phone before starting bot, send SMS with `t.me/<bot>?start=invite_<token>`
   - Bot recognizes invite token on `/start` and binds user to the funded job
 

@@ -4,12 +4,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
+    ClientSignupRequest,
     LoginRequest,
     OTPResponse,
     SignupRequest,
     TokenResponse,
     UserProfileResponse,
     VerifyOTPRequest,
+    WorkerSignupRequest,
 )
 from app.core.config import settings
 from app.core.database import get_db
@@ -55,13 +57,64 @@ async def get_current_user(
         )
 
 
+@router.post("/signup/worker", response_model=OTPResponse, status_code=status.HTTP_201_CREATED)
+async def signup_worker(
+    payload: WorkerSignupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Worker Signup:
+    Registers an artisan with Name, Phone, and Artisan Track (trade), then sends SMS OTP.
+    """
+    try:
+        await auth_service.request_signup(
+            db=db,
+            name=payload.name,
+            phone=payload.phone,
+            role="worker",
+            trade=payload.trade.value,
+        )
+        return OTPResponse(
+            phone=payload.phone,
+            message="Verification code sent via SMS. Enter OTP to activate your artisan profile.",
+            expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/signup/client", response_model=OTPResponse, status_code=status.HTTP_201_CREATED)
+async def signup_client(
+    payload: ClientSignupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Client Signup:
+    Registers a client with Name and Phone, then sends SMS OTP.
+    """
+    try:
+        await auth_service.request_signup(
+            db=db,
+            name=payload.name,
+            phone=payload.phone,
+            role="client",
+        )
+        return OTPResponse(
+            phone=payload.phone,
+            message="Verification code sent via SMS. Enter OTP to activate your client account.",
+            expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 @router.post("/signup", response_model=OTPResponse, status_code=status.HTTP_201_CREATED)
 async def signup(
     payload: SignupRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Passwordless Signup:
+    Unified Passwordless Signup:
     Registers a new worker or client profile and dispatches a 6-digit OTP via SMS.
     """
     try:
@@ -70,6 +123,7 @@ async def signup(
             name=payload.name,
             phone=payload.phone,
             role=payload.role,
+            trade=payload.trade.value if payload.trade else None,
         )
         return OTPResponse(
             phone=payload.phone,

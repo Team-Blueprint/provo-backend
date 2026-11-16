@@ -85,7 +85,7 @@ class MockPagaAdapter(PagaAdapter):
         raw_body: bytes,
         signature: str,
     ) -> bool:
-        """Validates signature using configured PAGA_HMAC_KEY."""
-        key = settings.PAGA_HMAC_KEY or "mock-hmac-key-test"
+        """Validates signature using configured PAGA_HASH_KEY."""
+        key = settings.PAGA_HASH_KEY or "mock-hmac-key-test"
         computed = hmac.new(key.encode("utf-8"), raw_body, hashlib.sha512).hexdigest()
         return hmac.compare_digest(computed.lower(), signature.strip().lower())

@@ -1,18 +1,28 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.auth import get_current_user
-from app.api.schemas import JobCreateRequest, JobResponse
+from app.api.schemas import (
+    DisputeRequest,
+    JobCreateRequest,
+    JobDayResponse,
+    JobResponse,
+    ReceiptResponse,
+)
 from app.core.database import get_db
-from app.db.models import User
+from app.db.models import Receipt, User
 from app.services.funding_service import FundingService
 from app.services.job_service import JobService
+from app.services.release_service import ReleaseService
 
 router = APIRouter(prefix="/jobs", tags=["Jobs & Escrow"])
 job_service = JobService()
 funding_service = FundingService()
+release_service = ReleaseService()
 
 
 @router.post("", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
@@ -21,10 +31,7 @@ async def create_job(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Creates an escrow job draft with daily schedule.
-    Authenticated client creates the job.
-    """
+    """Creates an escrow job draft with daily pay schedule."""
     try:
         job = await job_service.create_job(
             db=db,
@@ -67,3 +74,95 @@ async def initiate_fund_request(
         return await job_service.get_job_by_id(db, job_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{job_id}/days/{day_number}/done", response_model=JobDayResponse)
+async def report_day_done(
+    job_id: uuid.UUID,
+    day_number: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Artisan reports a day's work as done.
+    Starts the 24-hour review window.
+    """
+    try:
+        day = await release_service.report_day_done(
+            db=db,
+            job_id=job_id,
+            day_number=day_number,
+            worker_user_id=current_user.id,
+        )
+        return day
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{job_id}/days/{day_number}/confirm", response_model=JobDayResponse)
+async def confirm_day(
+    job_id: uuid.UUID,
+    day_number: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Client or designated supervisor confirms daily work.
+    Releases daily pay and mints receipt if final day.
+    """
+    try:
+        day, _payout = await release_service.confirm_day(
+            db=db,
+            job_id=job_id,
+            day_number=day_number,
+            actor_user_id=current_user.id,
+        )
+        return day
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{job_id}/days/{day_number}/dispute", response_model=JobDayResponse)
+async def dispute_day(
+    job_id: uuid.UUID,
+    day_number: int,
+    payload: DisputeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Client or supervisor disputes a day's work.
+    Freezes the 24-hour countdown.
+    """
+    try:
+        day, _dispute = await release_service.dispute_day(
+            db=db,
+            job_id=job_id,
+            day_number=day_number,
+            actor_user_id=current_user.id,
+            reason=payload.reason,
+        )
+        return day
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.get("/verify/{receipt_number}", response_model=ReceiptResponse)
+async def verify_receipt(
+    receipt_number: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Public Proofwork Receipt verification endpoint.
+    Lenders or clients can verify receipt authenticity by ID.
+    """
+    clean_num = receipt_number.strip().upper()
+    stmt = (
+        select(Receipt)
+        .where(Receipt.receipt_number == clean_num)
+        .options(selectinload(Receipt.job))
+    )
+    receipt = (await db.execute(stmt)).scalar_one_or_none()
+    if not receipt:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
+    return receipt

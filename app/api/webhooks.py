@@ -53,3 +53,30 @@ async def paga_webhook(
     except ValueError as e:
         logger.warning("Paga webhook rejection: %s", e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/telegram")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(None, alias="X-Telegram-Bot-Api-Secret-Token"),
+):
+    """
+    Ingests live updates from Telegram Bot API:
+    - Validates X-Telegram-Bot-Api-Secret-Token header
+    - Feeds update to aiogram dispatcher
+    """
+    from app.core.config import settings
+    from app.integrations.telegram.bot import process_telegram_webhook_update
+
+    if settings.TELEGRAM_WEBHOOK_SECRET and x_telegram_bot_api_secret_token != settings.TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Telegram webhook secret")
+
+    try:
+        raw_body = await request.body()
+        payload = json.loads(raw_body.decode("utf-8"))
+        await process_telegram_webhook_update(payload)
+        return {"ok": True}
+    except Exception as e:
+        logger.error("Failed to process Telegram webhook update: %s", e)
+        # Always return 200/ok so Telegram doesn't retry infinitely on non-critical update errors
+        return {"ok": True, "error": str(e)}
