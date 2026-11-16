@@ -1,0 +1,91 @@
+import uuid
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.enums import DayStatus, JobStatus, TradeType
+
+
+# --- Auth Schemas ---
+class SignupRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(..., min_length=2, max_length=150)
+    phone: str = Field(..., description="Phone number in national or E.164 format")
+    role: str = Field("worker", description="'worker' or 'client'")
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    phone: str = Field(..., description="Phone number in national or E.164 format")
+
+
+class VerifyOTPRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    phone: str
+    code: str = Field(..., min_length=4, max_length=10)
+
+
+class OTPResponse(BaseModel):
+    phone: str
+    message: str
+    expires_in_minutes: int
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user_id: uuid.UUID
+    name: str
+    phone: str
+    is_worker: bool
+    is_client: bool
+
+
+class UserProfileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    name: str
+    phone: str
+    is_worker: bool
+    is_client: bool
+    is_supervisor: bool
+    payout_account_number: str | None = None
+    payout_bank_code: str | None = None
+
+
+# --- Job Schemas ---
+class JobCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    trade: TradeType
+    description: str = Field(..., min_length=5)
+    total_kobo: int = Field(..., gt=0, description="Total job amount in integer kobo")
+    days: int = Field(1, ge=1, le=90, description="Number of working days for escrow release")
+    worker_id: uuid.UUID | None = None
+    supervisor_id: uuid.UUID | None = None
+
+
+class JobDayResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    day_number: int
+    amount_kobo: int
+    status: DayStatus
+    done_at: Any = None
+    release_at: Any = None
+
+
+class JobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    client_id: uuid.UUID
+    worker_id: uuid.UUID | None
+    supervisor_id: uuid.UUID | None
+    trade: str
+    description: str
+    total_kobo: int
+    days: int
+    status: JobStatus
+    funding_reference: str
+    paga_payment_url: str | None = None
+    paga_account_number: str | None = None
+    days_schedule: list[JobDayResponse] = []

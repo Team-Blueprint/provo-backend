@@ -56,4 +56,5 @@ logs/
 Thumbs.db
 
 .agents/
+.agents/
 .env

@@ -1,219 +1,202 @@
+Proofwork: escrow-backed work records for informal workers
+Joshua Udom, revised 16 November 2026, for the Paga APIs competition. Replaces the draft of 13 November.
 One-line description
-Proofwork turns every payment an informal worker receives into a confirmed job record that lenders
-can trust.
+Proofwork holds a client's payment for a job in escrow, pays the worker day by day as work is confirmed, and turns each confirmed day into a job record that lenders can trust.
+What changed from the 13 November draft
+    • Escrow moves from "later product" to the core of the build. The client locks the job's money before work starts and it is released day by day.
+    • Payment now comes before work. The client's payment still creates the record, but confirmation now happens per work day.
+    • A worker's "done" message starts a 24-hour window. The client or a supervisor the client names confirms, or the day releases automatically. Auto-released days count for less in the score, because silence is not confirmation.
+    • Clients pick a worker from a list of registered artisans or invite one by phone number. This is a thin directory, not job matching.
+    • Telegram is the main channel for clients and workers and is built for real. SMS, WhatsApp and USSD are simulated or secondary.
+    • The claim to cover cash income is dropped. Jobs run through escrow are digital, so cash jobs are out of scope for the first version.
+    • The backend is FastAPI.
 Problem
-Emem is a bricklayer in Uyo. He works for different clients and moves between building sites. Some
-clients pay by bank transfer and others pay cash. At the end of the month the money is there, but
-nothing shows how he earned it. He wants a loan to buy his own tools so he can take on more jobs. A
-lender looking at his bank statement sees only deposits. It cannot tell a client payment from a gift or a
-loan repayment, so it has no reliable proof of steady income.
+Emem is a bricklayer in Uyo. He works for different clients and moves between building sites. Some clients pay by bank transfer, some pay cash, and some pay late or in pieces. At the end of the month the money is there, but nothing shows how he earned it. He wants a loan to buy his own tools so he can take on more jobs. A lender looking at his bank statement sees only deposits. It cannot tell a client payment from a gift or a loan repayment, so it has no reliable proof of steady income.
 Emem is not an exception.
-• About 83% of jobs in Africa were informal in 2024 (ILO and UN Economic Commission for Africa).
-• In Nigeria, payment access rose from 22% to 52% of adults between 2010 and 2023, while credit
-access grew by only about 4 points (EFInA, Access to Financial Services in Nigeria, 2023).
-Payments are everywhere, but credit is not following.
-• Among informal businesses that got credit, 70.7% got it from friends and family and 12.2% from
-banks (Moniepoint informal economy report, 2024). That survey covers businesses, not individual
-workers, and Moniepoint is a lender.
-No source found so far measures how many workers are refused credit for lack of proof of income.
-This is an inference to be tested through the interviews in the implementation plan.
+    • About 83% of jobs in Africa were informal in 2024 (ILO and UN Economic Commission for Africa).
+    • In Nigeria, payment access rose from 22% to 52% of adults between 2010 and 2023, while credit access grew by only about 4 points (EFInA, Access to Financial Services in Nigeria, 2023). Payments are everywhere, but credit is not following.
+    • Among informal businesses that got credit, 70.7% got it from friends and family and 12.2% from banks (Moniepoint informal economy report, 2024). That survey covers businesses, not individual workers, and Moniepoint is a lender.
+No source found so far measures how many workers are refused credit for lack of proof of income. This is an inference to be tested through the interviews in the implementation plan. The same goes for late and missing payment: it is a hypothesis that day workers are often paid late or short, and the interviews should confirm or kill it.
 Solution
-Each worker gets a dedicated Paga account number and a payment link. When a client pays through
-either, the client confirms the payment was for work and picks a job type from a list. Each confirmed
-job becomes a line in the worker's record, with a receipt issued by Proofwork. Over months the record
-shows confirmed jobs, repeat clients and active months. The worker shares a report with a lender,
-with client identities tokenized.
-One rule governs the product: a record is created by the client's payment and confirmation, never by
-the worker's own entry. A job the worker types in himself is a draft that counts for nothing. This is
-what makes the record safe for a lender to rely on, and it is why Proofwork issues receipts only for
-work it can verify.
-Proofwork is an income verification product for lending. It is not a job platform. It does not find work
-for the worker. It makes the income from jobs he already has count toward credit.
+A client creates a job in Proofwork, chooses a worker and locks the full pay for the job. The worker does the work and reports each day as done. The client, or a supervisor the client named, confirms the day, and that day's pay goes to the worker's Paga account. Each confirmed day becomes a line in the worker's record, and the finished job gets a receipt issued by Proofwork. Over months the record shows confirmed days, repeat clients and active months. The worker shares a report with a lender, with client identities tokenized.
+Client flow
+    1. The client signs up on Telegram or the web with a verified phone number.
+    2. The client creates a job: a trade picked from a list (bricklaying, painting and so on), a short description and an area.
+    3. The client picks a worker from the list of available artisans for that trade, or invites a worker by phone number.
+    4. The client sets the total pay and the number of days. Daily pay is the total divided by the days, with any remainder on the last day.
+    5. The client locks the money. Proofwork returns a one-time account number and payment link for the job. The client pays from any bank, and the job is locked when Paga's callback arrives.
+    6. The client can add a foreman or supervisor who confirms daily work in the client's place.
+    7. Each day, after the worker reports done, the client or supervisor confirms and that day's pay is released. Either can also dispute the day.
+    8. If nobody responds within 24 hours of the worker's "done", the day's pay is released automatically. A dispute inside that window freezes the day.
+    9. When the last day is settled, the job closes and Proofwork issues a receipt.
+Worker flow
+    1. The worker signs up on Telegram, with web as the second option and USSD and WhatsApp shown as simulated flows. He gives the Paga account that pay should go to.
+    2. If a client invited him before he signed up, he gets an SMS saying a job with locked funds is waiting, with a link that opens the Telegram bot.
+    3. He accepts the job.
+    4. Each working day he sends "done". The day shows as awaiting confirmation until the client or supervisor acts.
+    5. After confirmation, that day's pay arrives in his Paga account. If nobody acts, it arrives after 24 hours.
+The one rule
+The worker's own entry never creates a record. A record needs two things from outside the worker: a client payment that is locked before work, and a recorded decision on each day. A confirmed day counts in full. An auto-released day counts at a lower weight. A disputed day counts for nothing until it is resolved in the worker's favour. A job the worker types in himself is a draft that counts for nothing.
+What escrow adds
+The worker sees that the money exists before he starts, which gives him a reason to join besides the loan. The client risks one day's pay at a time and releases his own money, so confirming is something he already has a reason to do. For lenders, the payment amount is verified before the work, which is stronger than a transfer made afterwards.
+Proofwork is still an income verification product for lending. The artisan list is a convenience that brings clients to the product. It does not rank workers or match them beyond trade and area.
 Target audience
-Primary users are informal workers who have named clients and are paid per job. Scope stays broad
-for now, with niching later. Three example groups for the pitch:
-1 Building trades: bricklayers, painters, electricians, plumbers and carpenters. Payments are
-sizeable, clients hire again, and tools are an obvious reason to borrow. Cash payment on site is
-the weak spot.
-2 Tailors, fashion makers and hairdressers: repeat clients, transfers are common, and equipment
-such as a sewing machine or a generator is a typical loan purpose. Payments are smaller, so a
-useful record takes more jobs.
-3 Mechanics and auto repairers: a named customer pays per repair, owners return, and the
-equipment need is clear. Cash is common here too.
-Market traders and drivers who serve walk-in customers are a poor fit. They receive many small
-anonymous payments, so payer confirmation does not work well for them.
-Two other parties use the product: clients, who pay and confirm, and lenders such as microfinance
-banks and fintech lenders, who read the report.
-Workflow
-Worker side
-1 The worker signs up over WhatsApp or USSD and gets a dedicated Paga account number and a
-payment link.
-2 After a job he sends the link to the client, or gives the account number.
-3 He gets a message when money arrives, showing whether the job is confirmed or waiting for
-confirmation.
-4 For a cash job he logs it by message. It stays a draft until the client confirms.
-5 He can ask for his record at any time and share a lender report link.
-Client side
-1 The client opens the link, picks a job type, enters the amount and their phone number, and pays
-through Paga.
-2 For a direct transfer to the account number, the client gets a message asking whether the
-payment was for work by the worker, and picks a job type.
-3 For cash, the client gets the same message after the worker logs the job.
-4 A client without WhatsApp gets an SMS link, or can use a USSD code.
-5 The client gets a receipt for each confirmed job.
-Lender side
-1 The lender opens the worker's report: confirmed jobs, repeat clients, active months and a score.
-2 Clients appear as tokens, for example "Client A3F, phone verified, 4 payments over 3 months",
-with first name and last initial. Tokens come from a hash of the payer's phone number, so repeat
-clients stay visible without exposing identity.
-3 Full identities are released only for a dispute, with the client's consent.
-Grades, strongest first
-1 Paid through the link, client phone verified.
-2 Transfer to the dedicated account, confirmed by the client.
-3 Cash, confirmed by the client. This carries a capped share of the score and is never the basis for
-a loan on its own.
-
+Primary users are informal workers who have named clients and are paid per job or per day. Scope stays broad for now, with niching later.
+    1. Building trades: bricklayers, painters, electricians, plumbers and carpenters. Daily pay and multi-day jobs fit this model best. Payments are sizeable, clients hire again, and tools are an obvious reason to borrow.
+    2. Tailors, fashion makers and hairdressers: repeat clients, and equipment such as a sewing machine or a generator is a typical loan purpose. Work is paid per item, so these jobs run as one-day jobs. Payments are smaller, so a useful record takes more jobs.
+    3. Mechanics and auto repairers: a named customer pays per repair, owners return, and the equipment need is clear. Also modelled as short jobs.
+Market traders and drivers who serve walk-in customers are a poor fit. They receive many small anonymous payments, so a job-by-job escrow flow does not suit them.
+Three other parties use the product: clients, who lock and release pay; supervisors, who confirm in the client's place; and lenders such as microfinance banks and fintech lenders, who read the report.
 Technology
-• Paga Collect API: persistent payment accounts (dedicated virtual accounts that can be funded
-from any bank or mobile money operator, with automatic deposit notifications) and payment
-requests with callbacks, which can accept bank transfer and USSD funding.
-• A webhook service that receives each payment event and creates a record only when a client
-payment arrives.
-• A confirmation flow over WhatsApp and SMS, with USSD for basic phones. WhatsApp business
-messages need pre-approved templates, and a USSD shortcode needs a telco aggregator and
-takes weeks, so USSD is mocked for the demo.
-• A scoring layer: count unique confirmed payers instead of payments, weight repeat clients, flag
-payments that circle between the same few accounts, give less weight to payers with no other
-history in the system, and cap the share of cash jobs.
-• A lender report view with tokenized payers.
-• A lending partner. Paga's developer page lists Collect, Persistent Payment Account, Business
-REST and Merchant Services APIs, and none is lending. Loans need a licensed lender, with Paga
-used for repayment collection.
-Why Paga: it offers the collection and notification rails above, Paga Engine pitches fraud detection
-and compliance tooling, and Doroki already runs pay-from-any-bank flows for small merchants. No
-public Paga product builds an income record for informal workers, so Proofwork is a layer on top of
-Paga rails.
+    • Paga Collect API: a one-time payment account and payment request per job, with a callback when the client's transfer arrives.
+    • Paga payout to the worker's Paga account on release. Which Paga API supports payouts, and whether the sandbox does, must be confirmed in the docs. The payout step sits behind an adapter so it can be simulated and labelled if the sandbox does not support it.
+    • A FastAPI backend with a Postgres database, an internal ledger, a job and work-day state machine, and a background scheduler for the 24-hour release.
+    • A Telegram bot for clients, workers and supervisors. An SMS provider for invitations and basic-phone fallback. WhatsApp business messages need pre-approved templates and a USSD shortcode needs a telco aggregator and takes weeks, so both are mocked for the demo.
+    • A scoring layer: count unique confirmed payers instead of payments, weight repeat clients, flag payments that circle between the same few accounts, give less weight to payers with no other history in the system, and weight auto-released days below confirmed ones.
+    • A lender report view with tokenized payers.
+    • A lending partner. Paga's developer page lists Collect, Persistent Payment Account, Business REST and Merchant Services APIs, and none is lending. Loans need a licensed lender, with Paga used for repayment collection.
+Why Paga: it offers the collection and notification rails above, Paga Engine pitches fraud detection and compliance tooling, and Doroki already runs pay-from-any-bank flows for small merchants. No public Paga product builds an income record for informal workers, so Proofwork is a layer on top of Paga rails.
 What makes it different
-Lenders such as Moniepoint already underwrite from transaction histories, but a lender only sees
-payments that pass through its own rails. Emem's income comes from many banks and in cash.
-Proofwork differs in four ways:
-• It is lender-neutral, so any lender can read the record.
-• It includes cash and cross-bank payments.
-• Payers confirm each payment, so the record does not rest on the worker's word.
-• Each job is a structured entry with a job type and a receipt, not a bare deposit.
-This is an argument, not a sourced finding, and it needs testing with lenders. Job marketplaces such
-as Wrkman, LaborHack and Handymesh are a different category, because they find work and
-Proofwork records it.
-Implementation
-1 Read Paga's Collect and Persistent Payment Account docs. Find out what the deposit callback
-returns (payer name, phone, account number) and get sandbox access if possible.
-2 Interview four or five tradespeople, three clients who hired one recently, and one or two loan
-officers. Ask workers how they are paid and whether lack of tools has cost them work. Ask clients
-what went wrong and what they checked. Ask loan officers what they ask informal applicants to
-bring.
-
-3 Build one demo path: the client opens the link, picks a job type and pays, the webhook fires, the
-client confirms by message, the record and receipt appear, and the lender report shows the score.
-Build WhatsApp and SMS for real. Mock USSD and the loan step. Seed one worker with a few
-months of history.
-4 Write the fraud rules on one slide.
-5 Shape the pitch: the one-line description, Emem's story, the data, the demo, the difference from
-existing lenders, and a next-steps slide.
+Lenders such as Moniepoint already underwrite from transaction histories, but a lender only sees payments that pass through its own rails. Emem's income comes from many banks. Proofwork differs in four ways:
+    • It is lender-neutral, so any lender can read the record.
+    • It covers payments from any bank, because the client funds each job through a Paga account number.
+    • The client commits money before work and decides on each day, so the record does not rest on the worker's word.
+    • Each job is a structured entry with a trade, a number of days, per-day outcomes and a receipt, not a bare deposit.
+This is an argument, not a sourced finding, and it needs testing with lenders. Job marketplaces such as Wrkman, LaborHack and Handymesh are a different category, because they find and rank work. Proofwork has a basic artisan list but its product is the verified record. Escrow itself is not new, so the pitch should not claim it as the invention. The new part is turning escrow outcomes into a record a lender can read.
+Technical implementation plan
+Stack
+Python 3.12 and FastAPI with Pydantic v2 models. SQLAlchemy 2.0 with Alembic migrations on PostgreSQL. httpx for the Paga client. aiogram 3 for the Telegram bot, run in webhook mode inside the same FastAPI app. Jinja2 with HTMX for the small web views (client dashboard, worker profile, lender report), which avoids a separate frontend build. pytest for tests. Docker Compose with the app, Postgres and a worker process. Python is memory-safe, which answers the judging criterion on memory safety.
+Repository layout
+    • app/domain: pure Python with no database or network calls. Job and day state machine, ledger rules, scoring, fraud rules. Most tests live here.
+    • app/services: use-case functions such as create_job, confirm_day, release_day, build_report. Each runs in one database transaction.
+    • app/integrations: the Paga client (real and fake implementations behind one interface), SMS sender, Telegram handlers.
+    • app/api: FastAPI routers for auth, jobs, workers, webhooks, reports and admin.
+    • app/workers: the release scheduler and the payout worker.
+    • app/db: models and migrations.
+    • tests, docs (architecture diagram, API notes, demo script) and a README with setup steps.
+Job and day lifecycle
+A job moves through these states: DRAFT, AWAITING_FUNDING, FUNDED, IN_PROGRESS, COMPLETED, with CANCELLED and DISPUTED as side exits. Each work day has its own state: PENDING, DONE_REPORTED, CONFIRMED, AUTO_RELEASED, DISPUTED, PAID. Transitions live in one function per entity that takes the current state and an event and returns the new state or an error. Nothing else writes a state column. Every transition appends a row to an audit_events table with the actor and a timestamp.
+A day moves from DONE_REPORTED to CONFIRMED when an authorised confirmer acts, or to AUTO_RELEASED when the scheduler finds it past its release time with no dispute. Both lead to a payout and then PAID. A dispute moves the day to DISPUTED and stops the scheduler from touching it.
+Data model
+    • users: id, role flags, Telegram user id, verified phone, payout account for workers.
+    • worker_profiles: trade, area, availability flag for the artisan list.
+    • jobs: client id, worker id, optional supervisor id, trade, description, total_kobo, days, status, funding reference.
+    • job_days: job id, day number, amount_kobo, status, done_at, release_at, decided_by, decided_at.
+    • payments_in: Paga event id (unique), job id, amount_kobo, payer name, phone and account number if the callback returns them, raw payload.
+    • ledger_entries: job id, optional day id, kind (FUNDED, RELEASED, REFUNDED), amount_kobo, created_at.
+    • payouts: day id, amount_kobo, idempotency reference (unique), status, attempts, Paga response.
+    • disputes: day id, opened_by, reason, status, resolution, resolved_by.
+    • receipts: receipt id, job id, issued_at.
+    • payer_tokens: client id, token used in lender reports.
+    • consents: worker id, lender or share link, scope, expiry, granted_at, revoked_at.
+    • client_notices: record that the client was told the payment is recorded.
+Money handling
+All amounts are integers in kobo. Daily amounts are computed once at job creation, so the sum of days equals the total exactly. The ledger holds one invariant that is tested: released plus refunded never exceeds funded, and for a finished job they are equal. Release and payout creation happen in the same transaction (an outbox pattern), so a confirmed day always has a payout row, and a crash cannot lose it.
+Paga integration
+    1. Create a payment request for each job when the client chooses to lock funds. Store the reference and return the account number and link.
+    2. Receive the callback at POST /webhooks/paga. Verify the signature, in whatever scheme Paga's docs specify, before parsing anything. Reject on failure.
+    3. Insert the event into payments_in. The unique constraint on the Paga event id makes repeats harmless: a second delivery inserts nothing and still returns success.
+    4. Compare the amount with the job's total. An exact match moves the job to FUNDED and writes a FUNDED ledger entry. A different amount keeps the job in AWAITING_FUNDING and flags it for manual handling. Partial payment and overpayment are edge cases to design after the sandbox shows what the callback returns.
+    5. On release, the payout worker sends the day's amount to the worker's Paga account using the payout row's reference as the idempotency key, retries with backoff on failure, and marks the day PAID only on success.
+    6. A small reconciliation command compares ledger totals with payout statuses and prints differences.
+The 13 November draft used a persistent account per worker. The new flow uses a one-time account per job, because the client locks money for one job. A persistent account can come back later for repeat clients.
+Telegram bot
+The bot runs on a webhook endpoint protected by Telegram's secret token header. Phone numbers come from Telegram's share-contact button, which gives a phone number Telegram has verified. Menus: clients get New job, My jobs and Confirm; workers get Available jobs and Done today; supervisors get a confirm list for the jobs they were added to.
+Confirm and Dispute buttons carry only an opaque identifier. The server checks that the Telegram user pressing the button is the job's client or supervisor, and that the day is in DONE_REPORTED. A bot cannot message someone who has never started it. So an invited worker or supervisor first gets an SMS with a t.me deep link that carries the invitation token, and the bot picks the job up when they press Start.
+Scheduler and payouts
+When a worker reports done, the app sets release_at to done_at plus 24 hours. A worker process polls every minute for days that are DONE_REPORTED and past release_at, locks them with SELECT ... FOR UPDATE SKIP LOCKED, marks them AUTO_RELEASED and creates payouts. A reminder goes to the client and supervisor at about 12 hours. The window length is an environment variable, so the demo can run with a two-minute window.
+Scoring and fraud rules
+The scoring function is pure and takes a worker's job and day history. Inputs: confirmed days, auto-released days, unique payers, repeat payers, active months and total confirmed value. Weights live in config.
+    • Count unique confirmed payers, not payments. Repeat payers add weight.
+    • Auto-released days count at a lower weight than confirmed days. A worker whose days are mostly auto-released is shown that way in the report.
+    • Disputed days count for nothing until resolved.
+    • Cap the share of the score that any one payer can supply.
+    • Give less weight to payers with no history in the system besides this worker.
+    • Flag circular flows: a payer who funded the worker also received money from the worker, or funding accounts that match the worker's own payout account.
+    • Flag a worker, client and supervisor who share a phone number or Telegram identity.
+    • Flag bursts: many jobs funded by one payer in a short window, or job values far outside the usual band for the trade.
+The output is a score, a band and a list of reasons, so a lender can see why. All of this has unit tests with small hand-built histories.
+API surface
+    • POST /auth/otp and POST /auth/verify for web sign-in. Telegram users are identified by their Telegram id.
+    • POST /jobs, GET /jobs/{id}, POST /jobs/{id}/assign, POST /jobs/{id}/fund-request
+    • GET /workers/available?trade=&area=
+    • POST /webhooks/paga and POST /webhooks/telegram
+    • POST /jobs/{id}/days/{n}/done, /confirm and /dispute
+    • GET /workers/{id}/record
+    • POST /workers/{id}/shares creates a consented, expiring share link. GET /reports/{token} returns the lender report.
+    • POST /admin/disputes/{id}/resolve. Dispute resolution is manual by an admin in the first version.
+Security and consent
+Secrets stay in environment variables. Every confirm, dispute and release action is authorised on the server against the job's parties. Lender reports use unguessable tokens with an expiry and show payer tokens, never names or phone numbers. The worker grants consent before any report is shared, and the client is told when funding that the payment is recorded. Both are stored. Rate limits go on the OTP and webhook routes.
+Testing
+    • State machine: every allowed transition, and a check that disallowed ones raise.
+    • Ledger: property test that released plus refunded never exceeds funded.
+    • Webhook: bad signature rejected, duplicate delivery ignored, wrong amount flagged.
+    • Release: confirm and auto-release each create exactly one payout, and a retry does not create a second.
+    • Scoring and fraud rules: one test per rule with a small history.
+    • One end-to-end test using the fake Paga client: create job, fund, report done, confirm, payout, report.
+Build order
+    1. Read Paga's Collect and payout docs. Find out what the deposit callback returns, how it is signed, and whether the sandbox can pay out. Get sandbox access.
+    2. Project skeleton, Docker Compose, database models and migrations, the domain state machine and ledger with tests.
+    3. Funding path: payment request, webhook, FUNDED state.
+    4. Telegram bot: sign-up, job creation, worker list, invitations, done, confirm, dispute.
+    5. Release path: scheduler, payouts, receipts.
+    6. Scoring, fraud rules, lender report, consent and share links.
+    7. Web views, seed data for one worker with several months of history, README, architecture diagram, API notes and demo script.
+    8. Simulated screens for SMS, WhatsApp and USSD, labelled as simulated.
 Fit with the judging criteria
-Technical quality carries 30 of the 100 points and presentation 10, so the build matters more than the
-pitch. Reviewers first score each application on problem fit, creativity and execution, and shortlisted
-teams then pitch live (Tech Ignite '26 criteria, techignite.net/apply).
-Criterion Points What is judged What Proofwork shows
-Technical quality 30 Code correctness, memory
-safety, efficiency,
-maintainability
-Real Paga sandbox integration, signature-checked and
-duplicate-safe callbacks, money stored as integers, tests
-for the scoring and fraud rules, a memory-safe language,
-a small readable codebase
-Innovation 20 Novelty, originality, creative
-problem-solving
-One rule: only a client's payment and confirmation
-creates a record. A lender-neutral report that covers cash
-and cross-bank income. No claim to have invented
-alternative credit scoring
-Impact and
-relevance
-20 Usefulness and applicability
-to African and global
-challenges
-Informal workers and the gap between payment access
-and credit access, interview quotes, a line on relevance
-beyond Nigeria (check any global figure before quoting it)
-Usability and
-design
-20 User experience,
-documentation quality,
-accessibility
-One-reply client confirmation, a basic-phone path by
-SMS, plain wording, a README with setup steps, an
-architecture diagram, API notes and a demo script
-Presentation 10 Clarity of the demonstration,
-technical explanation,
-delivery
-Emem's story first, a demo from the client's phone to the
-lender report, a short and accurate technical explanation
-Build scope for the demo (this replaces step 3 of Implementation):
-• Real: Paga sandbox integration, webhook, records, scoring, lender report and SMS confirmation
-(a simulated phone screen if no SMS sandbox is available, labelled as such).
-• Simulated and labelled: WhatsApp, USSD and the loan step.
+Technical quality carries 30 of the 100 points and presentation 10, so the build matters more than the pitch. Reviewers first score each application on problem fit, creativity and execution, and shortlisted teams then pitch live (Tech Ignite '26 criteria, techignite.net/apply).
+Technical quality (30): code correctness, memory safety, efficiency and maintainability. Proofwork shows a real Paga sandbox integration, signature-checked and duplicate-safe callbacks, money stored as integers, a tested state machine and ledger, tests for the scoring and fraud rules, and a small readable codebase.
+Innovation (20): novelty and creative problem-solving. Proofwork shows Emem's story first, a demo from the client's phone to the lender report, and one rule: locked client money and per-day decisions create the record. It does not claim to have invented escrow or alternative credit scoring.
+Impact and relevance (20): usefulness to African and global challenges. Informal workers, the gap between payment access and credit access, interview quotes, and a line on relevance beyond Nigeria (check any global figure before quoting it).
+Usability and design (20): user experience, documentation, accessibility. One-tap confirmation in Telegram, an SMS invitation path, plain wording, a README with setup steps, an architecture diagram, API notes and a demo script.
+Presentation (10): clarity of the demonstration, technical explanation and delivery.
+Build scope for the demo:
+    • Real: Paga sandbox funding and callback, the Telegram bot, the state machine, ledger, scheduler, scoring and the lender report.
+    • Real if the sandbox allows it, otherwise simulated and labelled: payout to the worker's Paga account.
+    • Simulated and labelled: SMS delivery if no sandbox exists, WhatsApp, USSD and the loan step.
 Must have
-• Dedicated account number and payment link per worker
-• Record created only from a client payment and confirmation
-• Job type picked from a list, never free text
-• Client confirmation by SMS with a one-reply path that works on a basic phone (WhatsApp and
-USSD shown as simulated flows)
-• Receipt issued by Proofwork with a receipt ID
-• Worker profile showing each job as a line
-• Scoring with unique payers, repeat clients, active months, circular-flow flags and the cash cap
-Proofwork overview Page 5
-• Lender report with tokenized payers
-• Consent from the worker to share, and notice to the client that the payment is recorded
-• A simple dispute window, where disputed payments drop out of the score
-• Real Paga sandbox integration: persistent account, payment request and callback
-• Callback handling that checks signatures and ignores duplicates, with money stored as integers
-• Automated tests for the scoring and fraud rules
-• A README with setup steps, an architecture diagram, API notes and a demo script
+    • Job creation with a trade picked from a list, never free text
+    • Worker list for a trade and area, and invitation by phone number
+    • One-time account number and payment link per job, with locking on Paga's callback
+    • Daily pay schedule computed in kobo
+    • Worker "done" report, client or supervisor confirmation, dispute, and automatic release after the window
+    • Optional supervisor who can confirm in the client's place
+    • Record created only from locked client money and a recorded decision on each day
+    • Receipt issued by Proofwork with a receipt ID
+    • Worker profile showing each job and day as a line
+    • Scoring with unique payers, repeat clients, active months, circular-flow flags, and lower weight for auto-released days
+    • Lender report with tokenized payers
+    • Consent from the worker to share, and notice to the client that the payment is recorded
+    • Callback handling that checks signatures and ignores duplicates
+    • Automated tests for the state machine, ledger, scoring and fraud rules
+    • A README with setup steps, an architecture diagram, API notes and a demo script
 Nice to have
-• USSD sign-up and confirmation for basic phones
-• Staged payments through several links, so a client pays a deposit and then instalments
-• Price range per job type, shown from confirmed jobs
-• Verified profile link for prospective clients and a "hire again" button
-• Lender option to call two or three clients, with their consent
-• Loan disbursement and repayment through a lender partner
-• Connecting a worker's existing bank account
-• Job matching and escrow, treated as later products
+    • USSD sign-up and confirmation for basic phones
+    • Staged funding, where a client locks a deposit first and adds instalments
+    • Refund of unreleased funds when a job is cancelled
+    • Price range per job type, shown from confirmed jobs
+    • Verified profile link for prospective clients and a "hire again" button
+    • Lender option to call two or three clients, with their consent
+    • Loan disbursement and repayment through a lender partner
+    • Connecting a worker's existing bank account
+    • Ratings, ranking and job matching beyond trade and area, treated as later products
 Questions and answers
-Why would a client confirm a payment? It takes one tap with no app, and they get a receipt
-naming the job. The client gets little else, so the design asks almost nothing of them. Cash
-confirmation rates will be lower, which is why cash grades lower.
-Why not a transfer with a description and a bank receipt? The description is free text, a
-screenshot can be edited, and nothing links payments into a history a lender can read.
-How does the worker find Proofwork? His reason to join is the loan. The strongest route is a lender
-who asks applicants without statements to bring a Proofwork record. Other routes are trade
-associations and his own clients, who see Proofwork each time they pay.
-Does Proofwork help him find jobs? No. It records the income from jobs he already has. A record
-needs several months of confirmed jobs from distinct payers, so a worker with few clients builds it
-slowly. Job matching is a later addition.
-What stops fake jobs? Only a client's payment and confirmation create a record. A friend could still
-pay and confirm a job that never happened, so the score rewards many distinct payers over several
-months, flags circular flows and gives new payers less weight. This makes fraud costly and visible
-without ruling it out. Loan officers can still verify by calling clients.
-Why is client identity tokenized? A lender needs to know payers are distinct, real people, not who
-they are. Tokens keep repeat clients visible, and full names stay with Proofwork.
-What about the law? Nigeria's data protection act requires consent that is freely given, specific,
-informed and clear, and sets data minimisation and purpose limitation as principles. The CBN
-consumer protection framework requires written consent before personal data is shared with a third
-party. The consent design should be checked with someone qualified before launch.
-Proofwork overview Page 6
-Who lends? Proofwork acts as a report provider, not a lender, which keeps regulatory exposure low.
-A microfinance bank or fintech lender would be the pilot partner. No lender is confirmed.
-Who pays? Proposed: free for the worker, with the lender paying per verified report. This is
-unvalidated.
-Open items: which lender will pilot, whether a lender accepts this record, which payer fields Paga's
-callback returns, the fee model, and the dispute process in detail.
+Why would a client confirm a day? It takes one tap in Telegram with no app to install, and it is the client's own money being released. Because silence also releases after 24 hours, the risk is that clients never confirm and most days end up auto-released. Auto-released days count for less, and the pilot should measure the confirmation rate.
+What if the worker reports done and the work was not done? The client or supervisor disputes inside the 24 hours. The day freezes and an admin resolves it by talking to both sides. The client's exposure is one day's pay.
+What if the client never funds a job? Nothing starts. The job stays in AWAITING_FUNDING and expires after a set time.
+Why not a transfer with a description and a bank receipt? The description is free text, a screenshot can be edited, and nothing links payments into a history a lender can read.
+How does the worker find Proofwork? Two routes. A client invites him by phone number and the SMS brings him in, and the job comes with locked pay. The second is a lender who asks applicants without statements to bring a Proofwork record. Trade associations are a third.
+What stops fake jobs? A friend could still fund and confirm a job that never happened. The score rewards many distinct payers over several months, flags circular flows and shared identities, gives new payers less weight and caps the share any single payer can supply. This makes fraud costly and visible without ruling it out. Loan officers can still verify by calling clients.
+Why is client identity tokenized? A lender needs to know payers are distinct, real people, not who they are. Tokens keep repeat clients visible, and full names stay with Proofwork.
+What about the law on holding money? Holding client funds before release may count as a regulated activity. Whether Proofwork can do this under Paga's account, as an agent of a licensed party, or only through a partner needs an answer from a qualified lawyer and from Paga before launch. For the competition demo, the sandbox holds the money.
+What about data law? Nigeria's data protection act requires consent that is freely given, specific, informed and clear, and sets data minimisation and purpose limitation as principles. The CBN consumer protection framework requires written consent before personal data is shared with a third party. The consent design should be checked with someone qualified before launch.
+Who lends? Proofwork acts as a report provider, not a lender. A microfinance bank or fintech lender would be the pilot partner. No lender is confirmed.
+Who pays? Proposed: free for the worker, with the lender paying per verified report. A small fee on escrowed jobs is a second option. Both are unvalidated.
+Open items
+    • Which Paga API supports payouts, and whether the sandbox does.
+    • What Paga's callback returns (payer name, phone, account number) and how it is signed.
+    • Who may hold escrowed funds under Nigerian rules, and what Paga allows.
+    • Dispute process in detail: who resolves, how long it takes, what happens to a frozen day after a deadline.
+    • Whether workers' jobs outside Proofwork, including cash jobs, should ever count.
+    • Whether the artisan list should be public to all clients or only reachable by invitation.
+    • Which lender will pilot, whether a lender accepts this record, and the fee model.
