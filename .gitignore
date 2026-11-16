@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments & Packaging (uv, venv, poetry)
+.venv/
+venv/
+ENV/
+env/
+.uv/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.template
+
+# Testing, Linting & Type Checking
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Build & Distribution
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Databases & Local Storage
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs & Debugging
+*.log
+logs/
+
+# IDE & Editor Files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+.agents/
+.env
