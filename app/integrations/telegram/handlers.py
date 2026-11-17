@@ -15,6 +15,7 @@ from app.domain.scoring import DayScoreInput, calculate_worker_score
 from app.integrations.telegram.keyboards import (
     client_main_menu,
     contact_keyboard,
+    fund_job_inline_keyboard,
     role_selection_keyboard,
     trade_selection_keyboard,
     worker_main_menu,
@@ -298,7 +299,7 @@ async def handle_fund_a_job(message: Message) -> None:
             select(Job)
             .where(
                 Job.client_id == user.id,
-                Job.status.in_([JobStatus.DRAFT.value, JobStatus.AWAITING_FUNDING.value, JobStatus.PARTIALLY_FUNDED.value]),
+                Job.status.in_([JobStatus.DRAFT.value, JobStatus.AWAITING_FUNDING.value, "PARTIALLY_FUNDED"]),
             )
             .options(selectinload(Job.worker), selectinload(Job.client))
             .order_by(Job.created_at.desc())
@@ -335,10 +336,13 @@ async def handle_fund_a_job(message: Message) -> None:
                 f"🏦 *Bank Transfer Instructions:*\n"
                 f"• *Bank Name:* `Paga`\n"
                 f"• *Account Number:* `{account_num}`\n\n"
-                f"💡 _Transfer the exact amount to the account above. Once the transfer lands, "
-                f"funds are safely locked in escrow and the artisan will be notified to start work._"
+                f"💡 _Transfer the exact amount to the account above. Or tap below to simulate deposit immediately!_"
             )
-            await message.answer(msg_text, parse_mode="Markdown")
+            await message.answer(
+                msg_text,
+                parse_mode="Markdown",
+                reply_markup=fund_job_inline_keyboard(str(job.id), job.paga_account_number),
+            )
 
 
 @router.message(F.text == "ℹ️ Help")
@@ -531,3 +535,62 @@ async def handle_inline_dispute(query: CallbackQuery) -> None:
             await query.answer(f"Failed: {e}", show_alert=True)
 
     await query.answer()
+
+
+@router.callback_query(F.data.startswith("sim_fund:"))
+async def handle_inline_simulate_funding(query: CallbackQuery) -> None:
+    """Client clicks '🚀 Simulate Escrow Deposit' in Telegram."""
+    if not query.message or not query.from_user:
+        return
+
+    job_id_str = query.data.split(":")[1]
+    job_id = uuid.UUID(job_id_str)
+
+    async with async_session_factory() as session:
+        stmt = (
+            select(Job)
+            .where(Job.id == job_id)
+            .options(selectinload(Job.worker), selectinload(Job.client), selectinload(Job.days_schedule))
+        )
+        job = (await session.execute(stmt)).scalar_one_or_none()
+        if not job:
+            await query.answer("Job not found.", show_alert=True)
+            return
+
+        funding_service = get_funding_service()
+        amount_naira_float = float(job.total_kobo / 100.0)
+        simulated_tx_id = f"SIM-TG-{uuid.uuid4().hex[:10].upper()}"
+
+        payload = {
+            "transactionId": simulated_tx_id,
+            "referenceNumber": job.funding_reference,
+            "accountNumber": job.paga_account_number or "3360702838",
+            "amount": amount_naira_float,
+            "currency": "NGN",
+            "payerName": query.from_user.full_name or "Telegram Client",
+            "payerPhoneNumber": job.client.phone if job.client else "+2348000000000",
+            "payerBank": "Access Bank",
+            "status": "SUCCESSFUL",
+            "channel": "BANK_TRANSFER",
+        }
+
+        try:
+            updated_job, _payment_in = await funding_service.process_paga_webhook(
+                db=session,
+                payload=payload,
+                raw_body=b"",
+                signature=None,
+            )
+            await session.commit()
+            await query.message.edit_text(
+                f"🎉 *Escrow Successfully Funded!*\n\n"
+                f"• *Job:* {updated_job.description}\n"
+                f"• *Amount:* ₦{amount_naira_float:,.2f}\n"
+                f"• *Status:* `{updated_job.status}`\n\n"
+                f"✅ Funds are now locked in escrow. The artisan has been notified to begin Day 1 work!",
+                parse_mode="Markdown",
+            )
+            await query.answer("Escrow payment simulated successfully! 🎉", show_alert=True)
+        except Exception as e:
+            logger.error("Simulation from Telegram failed: %s", e)
+            await query.answer(f"Simulation failed: {e}", show_alert=True)

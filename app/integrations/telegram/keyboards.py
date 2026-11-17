@@ -69,3 +69,16 @@ def day_review_inline_keyboard(job_id: str, day_number: int) -> InlineKeyboardMa
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def fund_job_inline_keyboard(job_id: str, account_number: str | None) -> InlineKeyboardMarkup:
+    """Provides a one-click simulate deposit button for testing/demo in Telegram."""
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="🚀 Simulate Escrow Deposit",
+                callback_data=f"sim_fund:{job_id}",
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

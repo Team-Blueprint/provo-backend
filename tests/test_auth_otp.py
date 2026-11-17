@@ -23,6 +23,7 @@ async def test_passwordless_signup_and_verify_otp_flow():
         signup_payload = {
             "name": "Babatunde Alabi",
             "phone": "+2348012345678",
+            "pin": "123456",
             "role": "worker",
         }
         res = await client.post("/auth/signup", json=signup_payload)
@@ -87,21 +88,39 @@ async def test_passwordless_login_for_registered_user():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Unregistered phone fails login
-        unreg_res = await client.post("/auth/login", json={"phone": "+2348099998888"})
-        assert unreg_res.status_code == 400
-        assert "not registered" in unreg_res.json()["detail"]
+        unreg_res = await client.post("/auth/login", json={"phone": "+2348099998888", "pin": "123456"})
+        assert unreg_res.status_code == 401
+        assert "Invalid phone number or PIN" in unreg_res.json()["detail"]
 
         # Register first
-        await client.post(
+        signup_res = await client.post(
             "/auth/signup",
-            json={"name": "Kelechi Okafor", "phone": "+2348099998888", "role": "client"},
+            json={"name": "Kelechi Okafor", "phone": "+2348099998888", "pin": "654321", "role": "client"},
         )
+        assert signup_res.status_code == 201
 
-        # Login request succeeds
-        login_res = await client.post("/auth/login", json={"phone": "+2348099998888"})
+        # Wrong PIN fails login
+        bad_pin_res = await client.post("/auth/login", json={"phone": "+2348099998888", "pin": "111111"})
+        assert bad_pin_res.status_code == 401
+        assert "Invalid phone number or PIN" in bad_pin_res.json()["detail"]
+
+        # Before phone verification, login requires verification first
+        unverified_res = await client.post("/auth/login", json={"phone": "+2348099998888", "pin": "654321"})
+        assert unverified_res.status_code == 401
+        assert "Account not yet verified" in unverified_res.json()["detail"]
+
+        # Verify phone with demo or real OTP code
+        otp_code = signup_res.json()["otp_code"]
+        verify_res = await client.post("/auth/verify-otp", json={"phone": "+2348099998888", "code": otp_code})
+        assert verify_res.status_code == 200
+
+        # Login with correct PIN now succeeds directly without OTP!
+        login_res = await client.post("/auth/login", json={"phone": "+2348099998888", "pin": "654321"})
         assert login_res.status_code == 200
-        assert "Login verification code sent" in login_res.json()["message"]
-        assert login_res.json()["otp_code"] is not None
+        tokens = login_res.json()
+        assert "access_token" in tokens
+        assert "refresh_token" in tokens
+        assert tokens["phone"] == "+2348099998888"
 
         # Resend OTP succeeds
         resend_res = await client.post("/auth/resend-otp", json={"phone": "+2348099998888"})
@@ -120,6 +139,7 @@ async def test_unified_worker_and_client_signup_and_refresh():
             json={
                 "name": "Emem Udoh",
                 "phone": "+2348077778888",
+                "pin": "123456",
                 "role": "worker",
                 "trade": "BRICKLAYING",
             },
@@ -134,6 +154,7 @@ async def test_unified_worker_and_client_signup_and_refresh():
             json={
                 "name": "Chief Bassey",
                 "phone": "+2348022223333",
+                "pin": "654321",
                 "role": "client",
             },
         )
