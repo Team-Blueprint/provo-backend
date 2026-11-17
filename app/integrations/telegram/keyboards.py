@@ -39,8 +39,8 @@ def trade_selection_keyboard() -> InlineKeyboardMarkup:
 def client_main_menu() -> ReplyKeyboardMarkup:
     """Main dashboard menu for clients."""
     kb = [
-        [KeyboardButton(text="📋 My Posted Jobs"), KeyboardButton(text="💳 Fund a Job")],
-        [KeyboardButton(text="ℹ️ Help")],
+        [KeyboardButton(text="➕ Create New Job"), KeyboardButton(text="📋 My Posted Jobs")],
+        [KeyboardButton(text="💳 Fund a Job"), KeyboardButton(text="ℹ️ Help")],
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -81,4 +81,45 @@ def fund_job_inline_keyboard(job_id: str, account_number: str | None) -> InlineK
             )
         ]
     ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+
+def job_trade_picker_keyboard() -> InlineKeyboardMarkup:
+    """Trade selection for creating a new job."""
+    buttons = [
+        InlineKeyboardButton(text=f"🔨 {t.value.capitalize()}", callback_data=f"create_job_trade:{t.value}")
+        for t in TradeType
+    ]
+    grid = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    grid.append([InlineKeyboardButton(text="❌ Cancel", callback_data="create_job_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=grid)
+
+
+def job_days_picker_keyboard() -> InlineKeyboardMarkup:
+    """Quick duration selection buttons."""
+    buttons = [
+        [
+            InlineKeyboardButton(text="1 Day", callback_data="create_job_days:1"),
+            InlineKeyboardButton(text="2 Days", callback_data="create_job_days:2"),
+        ],
+        [
+            InlineKeyboardButton(text="3 Days", callback_data="create_job_days:3"),
+            InlineKeyboardButton(text="5 Days", callback_data="create_job_days:5"),
+        ],
+        [InlineKeyboardButton(text="❌ Cancel", callback_data="create_job_cancel")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def artisan_picker_keyboard(artisans: list[dict[str, str]]) -> InlineKeyboardMarkup:
+    """Lists trade-matched artisans with one-tap selection, plus phone/skip options."""
+    buttons = []
+    for a in artisans:
+        label = f"👷 {a['name']} • {a['area']} ({a['badge']})"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_artisan:{a['user_id']}")])
+
+    buttons.append([InlineKeyboardButton(text="📱 Enter Different Phone Number", callback_data="choose_artisan:manual")])
+    buttons.append([InlineKeyboardButton(text="⏭️ Skip / Assign Later", callback_data="choose_artisan:skip")])
+    buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="create_job_cancel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)

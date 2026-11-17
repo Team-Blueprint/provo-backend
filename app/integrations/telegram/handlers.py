@@ -1,10 +1,13 @@
 import logging
 import uuid
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.database import async_session_factory
@@ -13,18 +16,32 @@ from app.core.utils import kobo_to_naira_str, normalize_phone_number
 from app.db.models import ClientProfile, Job, JobDay, User, WorkerProfile
 from app.domain.scoring import DayScoreInput, calculate_worker_score
 from app.integrations.telegram.keyboards import (
+    artisan_picker_keyboard,
     client_main_menu,
     contact_keyboard,
     fund_job_inline_keyboard,
+    job_days_picker_keyboard,
+    job_trade_picker_keyboard,
     role_selection_keyboard,
     trade_selection_keyboard,
     worker_main_menu,
 )
+from app.services.job_service import JobService
 from app.services.release_service import ReleaseService
 
 logger = logging.getLogger(__name__)
 router = Router()
 release_service = ReleaseService()
+job_service = JobService()
+
+
+class CreateJobStates(StatesGroup):
+    trade = State()
+    description = State()
+    days = State()
+    total_amount = State()
+    artisan_selection = State()
+    manual_artisan_phone = State()
 
 
 def get_funding_service():
@@ -594,3 +611,321 @@ async def handle_inline_simulate_funding(query: CallbackQuery) -> None:
         except Exception as e:
             logger.error("Simulation from Telegram failed: %s", e)
             await query.answer(f"Simulation failed: {e}", show_alert=True)
+
+
+
+# --- Create Job FSM Wizard ---
+
+@router.callback_query(F.data == "create_job_cancel")
+async def cancel_job_creation(query: CallbackQuery, state: FSMContext) -> None:
+    """Cancels active job creation and resets state."""
+    await state.clear()
+    if query.message:
+        await query.message.edit_text("❌ Job creation cancelled.")
+    await query.answer("Cancelled")
+
+
+@router.message(F.text == "➕ Create New Job")
+async def start_job_creation(message: Message, state: FSMContext) -> None:
+    """Step 1: Begins job creation by prompting client to pick a trade."""
+    tg_id = message.from_user.id if message.from_user else 0
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == tg_id)
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user or not user.is_client:
+            await message.answer("Please register as a Client to create jobs.")
+            return
+
+    await state.clear()
+    await state.set_state(CreateJobStates.trade)
+    await message.answer(
+        "🛠 *Create a New Escrow Job*\n\n"
+        "Step 1 of 5: Select the trade or skill required:",
+        parse_mode="Markdown",
+        reply_markup=job_trade_picker_keyboard(),
+    )
+
+
+@router.callback_query(CreateJobStates.trade, F.data.startswith("create_job_trade:"))
+async def process_job_trade(query: CallbackQuery, state: FSMContext) -> None:
+    """Step 2: Saves trade and prompts for job description."""
+    trade = query.data.split(":")[1]
+    await state.update_data(trade=trade)
+    await state.set_state(CreateJobStates.description)
+
+    if query.message:
+        await query.message.edit_text(
+            f"Selected Trade: *{trade}* ✅\n\n"
+            "Step 2 of 5: Briefly describe the work to be done\n"
+            "_(e.g. 'Fix leaking kitchen sink drainage and replace pipe')_:",
+            parse_mode="Markdown",
+        )
+    await query.answer()
+
+
+@router.message(CreateJobStates.description)
+async def process_job_description(message: Message, state: FSMContext) -> None:
+    """Step 3: Saves description and prompts for duration (number of days)."""
+    desc = message.text.strip() if message.text else ""
+    if len(desc) < 3:
+        await message.answer("Please provide a clearer description (at least 3 characters).")
+        return
+
+    await state.update_data(description=desc)
+    await state.set_state(CreateJobStates.days)
+
+    await message.answer(
+        "Step 3 of 5: How many days will this job take?\n"
+        "_(Select quick buttons below or type a number)_:",
+        reply_markup=job_days_picker_keyboard(),
+    )
+
+
+@router.callback_query(CreateJobStates.days, F.data.startswith("create_job_days:"))
+async def process_job_days_button(query: CallbackQuery, state: FSMContext) -> None:
+    """Handles quick duration button press."""
+    days = int(query.data.split(":")[1])
+    await state.update_data(days=days)
+    await state.set_state(CreateJobStates.total_amount)
+
+    if query.message:
+        await query.message.edit_text(
+            f"Duration: *{days} Day(s)* ✅\n\n"
+            "Step 4 of 5: Enter the *total pay in Naira* for the entire job\n"
+            "_(e.g. 15000 or 50000)_:",
+            parse_mode="Markdown",
+        )
+    await query.answer()
+
+
+@router.message(CreateJobStates.days)
+async def process_job_days_text(message: Message, state: FSMContext) -> None:
+    """Handles manual number of days input."""
+    text = message.text.strip() if message.text else ""
+    if not text.isdigit() or int(text) < 1 or int(text) > 365:
+        await message.answer("Please enter a valid number of days between 1 and 365.")
+        return
+
+    days = int(text)
+    await state.update_data(days=days)
+    await state.set_state(CreateJobStates.total_amount)
+
+    await message.answer(
+        f"Duration: *{days} Day(s)* ✅\n\n"
+        "Step 4 of 5: Enter the *total pay in Naira* for the entire job\n"
+        "_(e.g. 15000 or 50000)_:",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(CreateJobStates.total_amount)
+async def process_job_total_amount(message: Message, state: FSMContext) -> None:
+    """Step 5: Validates total amount and fetches trade-matched artisans from directory."""
+    raw = message.text.strip().replace(",", "") if message.text else ""
+    try:
+        amount_naira = float(raw)
+        if amount_naira < 100:
+            raise ValueError()
+    except ValueError:
+        await message.answer("Please enter a valid amount in Naira (minimum ₦100, e.g. 15000).")
+        return
+
+    total_kobo = round(amount_naira * 100)
+    await state.update_data(total_kobo=total_kobo, total_naira=amount_naira)
+    await state.set_state(CreateJobStates.artisan_selection)
+
+    data = await state.get_data()
+    trade = data.get("trade", "OTHER")
+
+    # Query artisans in directory whose trade matches
+    async with async_session_factory() as session:
+        stmt = (
+            select(WorkerProfile)
+            .where(WorkerProfile.trade == trade, WorkerProfile.is_available.is_(True))
+            .options(selectinload(WorkerProfile.user))
+            .limit(6)
+        )
+        profiles = list((await session.execute(stmt)).scalars().all())
+
+        artisan_list = []
+        for prof in profiles:
+            u = prof.user
+            if not u:
+                continue
+
+            # Count paid days
+            count_stmt = (
+                select(func.count(JobDay.id))
+                .join(Job, JobDay.job_id == Job.id)
+                .where(Job.worker_id == u.id, JobDay.status == DayStatus.PAID.value)
+            )
+            v_days = (await session.execute(count_stmt)).scalar() or 0
+            badge = "⭐ Gold" if v_days >= 30 else ("⭐ Silver" if v_days >= 10 else ("⭐ Bronze" if v_days >= 1 else "Unverified"))
+
+            artisan_list.append({
+                "user_id": str(u.id),
+                "name": u.name,
+                "area": prof.area,
+                "badge": badge,
+            })
+
+    if artisan_list:
+        text = (
+            f"Step 5 of 5: *Choose an Artisan for {trade}*\n\n"
+            f"Found {len(artisan_list)} registered artisan(s) in this trade.\n"
+            "Tap to assign directly, or enter a custom phone number:"
+        )
+    else:
+        text = (
+            f"Step 5 of 5: *Assign Artisan for {trade}*\n\n"
+            f"No artisans currently listed under {trade} in the public directory.\n"
+            "You can enter their phone number or skip for now:"
+        )
+
+    await message.answer(
+        text,
+        parse_mode="Markdown",
+        reply_markup=artisan_picker_keyboard(artisan_list),
+    )
+
+
+async def _finalize_job_creation(
+    client_tg_id: int,
+    worker_id: uuid.UUID | None,
+    state_data: dict[str, Any],
+) -> tuple[Job, str]:
+    """Helper to commit new job, initiate Paga escrow, and build response card."""
+    trade = state_data["trade"]
+    desc = state_data["description"]
+    days = state_data["days"]
+    total_kobo = state_data["total_kobo"]
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == client_tg_id)
+        client = (await session.execute(user_stmt)).scalar_one()
+
+        job = await job_service.create_job(
+            db=session,
+            client_id=client.id,
+            trade=trade,
+            description=desc,
+            total_kobo=total_kobo,
+            days=days,
+            worker_id=worker_id,
+        )
+        await session.commit()
+
+        # Generate Paga virtual escrow account
+        funding_service = get_funding_service()
+        try:
+            job = await funding_service.initiate_job_escrow(session, job.id)
+            await session.commit()
+        except Exception as e:
+            logger.warning("Could not auto-request escrow on creation: %s", e)
+
+        # Reload job with worker
+        stmt = (
+            select(Job)
+            .where(Job.id == job.id)
+            .options(selectinload(Job.worker), selectinload(Job.days_schedule))
+        )
+        job = (await session.execute(stmt)).scalar_one()
+
+        worker_display = f"{job.worker.name} ({job.worker.phone})" if job.worker else "Not yet assigned (Assign later)"
+        amount_naira = kobo_to_naira_str(job.total_kobo)
+        account_num = job.paga_account_number or "Pending..."
+
+        summary_text = (
+            f"🎉 *Escrow Job Created Successfully!*\n\n"
+            f"• *Trade:* {job.trade}\n"
+            f"• *Description:* {job.description}\n"
+            f"• *Duration:* {job.days} Day(s)\n"
+            f"• *Total Escrow:* *{amount_naira}*\n"
+            f"• *Artisan:* {worker_display}\n"
+            f"• *Status:* `{job.status}`\n\n"
+            f"🏦 *Bank Transfer Escrow Details:*\n"
+            f"• *Bank:* `Paga`\n"
+            f"• *Account Number:* `{account_num}`\n\n"
+            f"💡 _Transfer to the account above or tap 'Simulate Escrow Deposit' below to lock funds instantly!_"
+        )
+        return job, summary_text
+
+
+@router.callback_query(CreateJobStates.artisan_selection, F.data.startswith("choose_artisan:"))
+async def process_artisan_choice(query: CallbackQuery, state: FSMContext) -> None:
+    """Handles artisan selection from directory, manual option, or skip."""
+    choice = query.data.split(":")[1]
+    tg_id = query.from_user.id if query.from_user else 0
+
+    if choice == "manual":
+        await state.set_state(CreateJobStates.manual_artisan_phone)
+        if query.message:
+            await query.message.edit_text(
+                "📱 *Enter Artisan Phone Number*\n\n"
+                "Please type the artisan's phone number (e.g. `08012345678` or `+2348012345678`):",
+                parse_mode="Markdown",
+            )
+        await query.answer()
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    worker_id = uuid.UUID(choice) if choice != "skip" else None
+    job, summary_text = await _finalize_job_creation(tg_id, worker_id, data)
+
+    if query.message:
+        await query.message.edit_text(
+            summary_text,
+            parse_mode="Markdown",
+            reply_markup=fund_job_inline_keyboard(str(job.id), job.paga_account_number),
+        )
+    await query.answer("Job created!")
+
+
+@router.message(CreateJobStates.manual_artisan_phone)
+async def process_manual_artisan_phone(message: Message, state: FSMContext) -> None:
+    """Handles manual artisan phone number entry, looking up or creating worker."""
+    raw_phone = message.text.strip() if message.text else ""
+    clean_phone = normalize_phone_number(raw_phone)
+    tg_id = message.from_user.id if message.from_user else 0
+    data = await state.get_data()
+    trade = data.get("trade", "OTHER")
+
+    async with async_session_factory() as session:
+        # Check if worker exists
+        stmt = select(User).where(User.phone == clean_phone).options(selectinload(User.worker_profile))
+        worker = (await session.execute(stmt)).scalar_one_or_none()
+
+        if not worker:
+            # Create placeholder worker so they can be assigned and receive job invite SMS
+            worker = User(
+                name=f"Artisan ({clean_phone[-4:]})",
+                phone=clean_phone,
+                is_phone_verified=False,
+                is_worker=True,
+            )
+            session.add(worker)
+            await session.flush()
+            prof = WorkerProfile(user_id=worker.id, trade=trade)
+            session.add(prof)
+            await session.commit()
+        else:
+            if not worker.is_worker:
+                worker.is_worker = True
+                if not worker.worker_profile:
+                    prof = WorkerProfile(user_id=worker.id, trade=trade)
+                    session.add(prof)
+                await session.commit()
+
+        worker_id = worker.id
+
+    await state.clear()
+    job, summary_text = await _finalize_job_creation(tg_id, worker_id, data)
+
+    await message.answer(
+        summary_text,
+        parse_mode="Markdown",
+        reply_markup=fund_job_inline_keyboard(str(job.id), job.paga_account_number),
+    )

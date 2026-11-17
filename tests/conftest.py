@@ -53,3 +53,15 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
 
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+
+
+
+@pytest.fixture(autouse=True)
+def mock_httpsms_send(monkeypatch):
+    """Mocks SMSClient.send_sms during automated testing so external credits are not depleted."""
+    from app.integrations.sms.client import SMSClient
+
+    async def _mock_send(*args, **kwargs):
+        return {"status": "success", "id": "mock-sms-id"}
+
+    monkeypatch.setattr(SMSClient, "send_sms", _mock_send)
