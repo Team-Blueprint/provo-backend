@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     # Paga Configuration (supports PAGA_PUBLIC_KEY or PAGA_PRINCIPAL, PAGA_SECRET_KEY or PAGA_CREDENTIALS, PAGA_HASH_KEY or PAGA_HMAC_KEY)
     PAGA_USE_MOCK: bool = True
+    PAGA_COLLECT_BASE_URL: str = "https://beta-collect.paga.com"
     PAGA_SANDBOX_BASE_URL: str = "https://beta.mypaga.com/paga-webservices/business-rest"
     PAGA_PUBLIC_KEY: str = ""
     PAGA_SECRET_KEY: str = ""

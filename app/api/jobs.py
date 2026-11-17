@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -21,6 +22,7 @@ from app.services.job_service import JobService
 from app.services.release_service import ReleaseService
 
 router = APIRouter(prefix="/jobs", tags=["Jobs & Escrow"])
+logger = logging.getLogger(__name__)
 job_service = JobService()
 funding_service = FundingService()
 release_service = ReleaseService()
@@ -32,8 +34,16 @@ async def create_job(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Creates an escrow job draft with daily pay schedule."""
+    """
+    Creates an escrow job draft with daily pay schedule.
+    Supports single artisan or multi-artisan daily breakdowns via days_breakdown.
+    """
     try:
+        breakdown_dicts = (
+            [item.model_dump() for item in payload.days_breakdown]
+            if payload.days_breakdown
+            else None
+        )
         job = await job_service.create_job(
             db=db,
             client_id=current_user.id,
@@ -43,7 +53,16 @@ async def create_job(
             days=payload.days,
             worker_id=payload.worker_id,
             supervisor_id=payload.supervisor_id,
+            days_breakdown=breakdown_dicts,
         )
+
+        # If auto_fund_request is requested (default True), immediately request Paga NUBAN
+        if payload.auto_fund_request:
+            try:
+                await funding_service.initiate_job_escrow(db=db, job_id=job.id)
+            except Exception as exc:
+                logger.warning("Auto fund request on create failed: %s", exc)
+
         return await job_service.get_job_by_id(db, job.id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

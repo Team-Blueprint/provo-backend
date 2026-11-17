@@ -149,6 +149,7 @@ class JobDay(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     job_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("jobs.id"), index=True, nullable=False)
+    worker_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), index=True, nullable=True)
     day_number: Mapped[int] = mapped_column(Integer, nullable=False)
     amount_kobo: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default=DayStatus.PENDING.value, index=True, nullable=False)
@@ -160,6 +161,7 @@ class JobDay(Base, TimestampMixin):
 
     # Relationships
     job: Mapped[Job] = relationship("Job", back_populates="days_schedule")
+    worker: Mapped[User | None] = relationship("User", foreign_keys=[worker_id])
     decided_by_user: Mapped[User | None] = relationship("User", foreign_keys=[decided_by])
     payout: Mapped[Payout | None] = relationship("Payout", back_populates="day", uselist=False)
     dispute: Mapped[Dispute | None] = relationship("Dispute", back_populates="day", uselist=False)

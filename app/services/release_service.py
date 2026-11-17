@@ -59,16 +59,18 @@ class ReleaseService:
         if not job:
             raise ValueError("Job not found")
 
-        if job.worker_id != worker_user_id:
-            raise ValueError("Unauthorized: Only the assigned artisan can report work done.")
-
-        if job.status not in (JobStatus.FUNDED.value, JobStatus.IN_PROGRESS.value):
-            raise ValueError(f"Cannot report work for job with status '{job.status}'")
-
         # Find targeted day
         day = next((d for d in job.days_schedule if d.day_number == day_number), None)
         if not day:
             raise ValueError(f"Day {day_number} not found for this job")
+
+        # Artisan check: must be either the specific day artisan or the default job artisan
+        effective_worker_id = day.worker_id or job.worker_id
+        if effective_worker_id != worker_user_id:
+            raise ValueError("Unauthorized: Only the assigned artisan for this day can report work done.")
+
+        if job.status not in (JobStatus.FUNDED.value, JobStatus.IN_PROGRESS.value):
+            raise ValueError(f"Cannot report work for job with status '{job.status}'")
 
         if day.status != DayStatus.PENDING.value:
             raise ValueError(f"Day {day_number} cannot be reported done (status: {day.status})")
@@ -130,7 +132,7 @@ class ReleaseService:
             select(Job)
             .where(Job.id == job_id)
             .options(
-                selectinload(Job.days_schedule),
+                selectinload(Job.days_schedule).selectinload(JobDay.worker),
                 selectinload(Job.ledger_entries),
                 selectinload(Job.worker),
                 selectinload(Job.receipt),
@@ -368,18 +370,19 @@ class ReleaseService:
             refunded_kobo=refunded_kobo,
         )
 
-        # 4. Trigger Paga Payout
+        # 4. Trigger Paga Payout to the day's designated artisan (or fallback to job artisan)
+        artisan = day.worker or job.worker
         destination = (
-            job.worker.payout_account_number
-            if job.worker and job.worker.payout_account_number
+            artisan.payout_account_number
+            if artisan and artisan.payout_account_number
             else "9900000001"
         )
         bank_code = (
-            job.worker.payout_bank_code
-            if job.worker and job.worker.payout_bank_code
+            artisan.payout_bank_code
+            if artisan and artisan.payout_bank_code
             else "PAGA"
         )
-        worker_name = job.worker.name if job.worker else "Artisan"
+        worker_name = artisan.name if artisan else "Artisan"
 
         try:
             payout_res = await self.paga_adapter.disburse_payout(

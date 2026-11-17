@@ -8,6 +8,7 @@ from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.jobs import router as jobs_router
 from app.api.reports import router as reports_router
+from app.api.sandbox import router as sandbox_router
 from app.api.webhooks import router as webhooks_router
 from app.api.workers import router as workers_router
 from app.core.config import settings
@@ -46,6 +47,7 @@ app.include_router(workers_router)
 app.include_router(reports_router)
 app.include_router(admin_router)
 app.include_router(webhooks_router)
+app.include_router(sandbox_router)
 app.include_router(web_router)
 
 

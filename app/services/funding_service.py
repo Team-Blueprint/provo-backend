@@ -12,13 +12,20 @@ from app.core.enums import DayStatus, JobStatus, LedgerKind
 from app.db.models import AuditEvent, Job, LedgerEntry, PaymentIn
 from app.domain.lifecycle import JobEvent, transition_job_state
 from app.integrations.paga import PagaAdapter, get_paga_adapter
+from app.integrations.sms.client import SMSClient
+from app.integrations.telegram.bot import bot
 
 logger = logging.getLogger(__name__)
 
 
 class FundingService:
-    def __init__(self, paga_adapter: PagaAdapter | None = None) -> None:
+    def __init__(
+        self,
+        paga_adapter: PagaAdapter | None = None,
+        sms_client: SMSClient | None = None,
+    ) -> None:
         self.paga_adapter = paga_adapter or get_paga_adapter()
+        self.sms_client = sms_client or SMSClient()
 
     async def initiate_job_escrow(self, db: AsyncSession, job_id: uuid.UUID) -> Job:
         """
@@ -43,7 +50,10 @@ class FundingService:
             callback_url=callback_url,
         )
 
-        job.paga_payment_url = result.payment_url
+        # Use hosted checkout page if Paga Collect returns no custom web url
+        checkout_url = result.payment_url if ("http://" in result.payment_url or "https://" in result.payment_url) and "beta-collect.paga.com/pay" not in result.payment_url else f"{settings.BASE_URL}/checkout/{job.id}"
+
+        job.paga_payment_url = checkout_url
         job.paga_account_number = result.account_number
         job.status = transition_job_state(job.status, JobEvent.REQUEST_FUNDING).value
 
@@ -95,19 +105,36 @@ class FundingService:
             job = (await db.execute(job_stmt)).scalar_one()
             return job, existing_payment
 
-        # Look up Job by funding reference
-        reference = payload.get("referenceNumber") or payload.get("merchantTransactionId")
-        if not reference:
-            raise ValueError("Webhook payload missing referenceNumber")
-
-        job_stmt = (
-            select(Job)
-            .where(Job.funding_reference == reference)
-            .options(selectinload(Job.days_schedule))
+        # Look up Job by funding reference or by account number
+        reference = (
+            payload.get("referenceNumber")
+            or payload.get("merchantTransactionId")
+            or payload.get("transactionReference")
+            or payload.get("externalReferenceNumber")
         )
-        job = (await db.execute(job_stmt)).scalar_one_or_none()
+        account_number = payload.get("accountNumber")
+
+        if reference:
+            job_stmt = (
+                select(Job)
+                .where(Job.funding_reference == reference)
+                .options(selectinload(Job.days_schedule), selectinload(Job.worker), selectinload(Job.client))
+            )
+            job = (await db.execute(job_stmt)).scalar_one_or_none()
+        else:
+            job = None
+
+        # Fallback to account number matching if reference is not in payload or not matched
+        if not job and account_number:
+            job_stmt = (
+                select(Job)
+                .where(Job.paga_account_number == str(account_number))
+                .options(selectinload(Job.days_schedule), selectinload(Job.worker), selectinload(Job.client))
+            )
+            job = (await db.execute(job_stmt)).scalar_one_or_none()
+
         if not job:
-            raise ValueError(f"No job found matching funding reference: {reference}")
+            raise ValueError(f"No job found matching funding reference '{reference}' or account '{account_number}'")
 
         # Amount validation
         amount_raw = payload.get("amount", 0)
@@ -167,6 +194,9 @@ class FundingService:
             )
             db.add(audit)
             logger.info("Job %s fully funded (exact %s kobo). Status -> FUNDED", job.id, cumulative_kobo)
+
+            # Notify assigned worker via SMS & Telegram
+            await self._notify_worker_funded(job)
 
         elif cumulative_kobo < job.total_kobo:
             # Case B: Underfunding (e.g. split bank transfers or fee deduction)
@@ -253,5 +283,42 @@ class FundingService:
                 excess_kobo,
             )
 
+            # Notify assigned worker via SMS & Telegram
+            await self._notify_worker_funded(job)
+
         await db.flush()
         return job, payment_in
+
+    async def _notify_worker_funded(self, job: Job) -> None:
+        """Dispatches SMS and Telegram notification to the worker that escrow has funded."""
+        if not job.worker:
+            return
+
+        worker = job.worker
+        amount_naira = f"₦{job.total_kobo / 100:,.2f}"
+        msg_text = (
+            f"[Proofwork] Job funded! {amount_naira} has been locked in escrow for '{job.trade}'. "
+            f"It is safe to begin Day 1 work."
+        )
+
+        # 1. SMS Dispatch
+        if worker.phone:
+            try:
+                await self.sms_client.send_sms(to_phone=worker.phone, message=msg_text)
+                logger.info("Sent job funded SMS to worker %s (%s)", worker.id, worker.phone)
+            except Exception as e:
+                logger.warning("Failed to dispatch SMS to worker %s: %s", worker.phone, e)
+
+        # 2. Telegram Dispatch
+        if worker.telegram_user_id and bot:
+            try:
+                tg_text = (
+                    f"🎉 *Escrow Locked & Funded!*\n\n"
+                    f"Client has deposited *{amount_naira}* into escrow for:\n"
+                    f"🛠 *{job.trade}*: {job.description}\n\n"
+                    f"✅ Funds are guaranteed. Safe to start Day 1 work!"
+                )
+                await bot.send_message(chat_id=worker.telegram_user_id, text=tg_text, parse_mode="Markdown")
+                logger.info("Sent job funded Telegram alert to worker %s", worker.telegram_user_id)
+            except Exception as e:
+                logger.warning("Failed to send Telegram alert to worker %s: %s", worker.telegram_user_id, e)

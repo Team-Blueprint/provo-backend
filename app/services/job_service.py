@@ -1,5 +1,6 @@
 import logging
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,9 +24,11 @@ class JobService:
         days: int = 1,
         worker_id: uuid.UUID | None = None,
         supervisor_id: uuid.UUID | None = None,
+        days_breakdown: list[dict[str, Any]] | None = None,
     ) -> Job:
         """
         Creates a new escrow job draft and initializes its daily pay schedule.
+        Supports multi-artisan assignment where individual days can be assigned to different artisans.
         """
         daily_schedule = partition_daily_pay(total_kobo=total_kobo, days=days)
         funding_ref = f"PW-ESCROW-{uuid.uuid4().hex[:12].upper()}"
@@ -44,11 +47,21 @@ class JobService:
         db.add(job)
         await db.flush()
 
+        # Build day records
+        custom_breakdown_map = {item["day_number"]: item for item in (days_breakdown or [])}
+
         for idx, day_kobo in enumerate(daily_schedule, start=1):
+            custom_info = custom_breakdown_map.get(idx, {})
+            # If custom amount is provided, use it, else partition
+            effective_amount = custom_info.get("amount_kobo") or day_kobo
+            # If custom worker is assigned for this day, use them, otherwise default to job's worker_id
+            effective_worker = custom_info.get("worker_id") or worker_id
+
             day_record = JobDay(
                 job_id=job.id,
+                worker_id=effective_worker,
                 day_number=idx,
-                amount_kobo=day_kobo,
+                amount_kobo=effective_amount,
                 status=DayStatus.PENDING.value,
             )
             db.add(day_record)
@@ -92,7 +105,7 @@ class JobService:
     ) -> list[Job]:
         """
         Lists jobs with filtering and pagination.
-        Non-admin users can see jobs where they are the client, worker, or supervisor,
+        Non-admin users can see jobs where they are the client, default worker, day-assigned worker, or supervisor,
         or public jobs needing an artisan (e.g., worker_id is None).
         """
         stmt = (
@@ -101,7 +114,7 @@ class JobService:
                 selectinload(Job.client),
                 selectinload(Job.worker),
                 selectinload(Job.supervisor),
-                selectinload(Job.days_schedule),
+                selectinload(Job.days_schedule).selectinload(JobDay.worker),
                 selectinload(Job.ledger_entries),
                 selectinload(Job.payments_in),
                 selectinload(Job.receipt),
@@ -114,14 +127,15 @@ class JobService:
         if not is_admin and user_id:
             from sqlalchemy import or_
 
-            stmt = stmt.where(
+            stmt = stmt.outerjoin(Job.days_schedule).where(
                 or_(
                     Job.client_id == user_id,
                     Job.worker_id == user_id,
+                    JobDay.worker_id == user_id,
                     Job.supervisor_id == user_id,
                     Job.worker_id.is_(None),  # open job marketplace
                 )
-            )
+            ).distinct()
 
         # Filters
         if status:

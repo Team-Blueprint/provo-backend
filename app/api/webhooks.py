@@ -19,6 +19,7 @@ async def paga_webhook(
     db: AsyncSession = Depends(get_db),
     x_paga_signature: str | None = Header(None, alias="X-Paga-Signature"),
     hash_header: str | None = Header(None, alias="hash"),
+    x_paga_hash: str | None = Header(None, alias="x-paga-hash"),
 ):
     """
     Ingests Paga Collect payment callbacks:
@@ -28,6 +29,7 @@ async def paga_webhook(
     - Moves job to FUNDED and writes FUNDED ledger entry
     """
     raw_body = await request.body()
+    logger.info("Received Paga Webhook: %s", raw_body.decode("utf-8", errors="replace"))
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except Exception:
@@ -36,7 +38,7 @@ async def paga_webhook(
             detail="Invalid JSON payload",
         )
 
-    signature = x_paga_signature or hash_header
+    signature = x_paga_signature or hash_header or x_paga_hash
     try:
         job, payment_in = await funding_service.process_paga_webhook(
             db=db,

@@ -90,11 +90,28 @@ async def handle_contact_share(message: Message) -> None:
                 is_phone_verified=True,
             )
             session.add(user)
+            await session.commit()
+            is_existing_onboarded = False
         else:
             user.telegram_user_id = tg_id
             user.is_phone_verified = True
+            is_existing_onboarded = bool(user.is_worker or user.is_client)
+            await session.commit()
 
-        await session.commit()
+    if is_existing_onboarded:
+        if user.is_worker:
+            await message.answer(
+                f"Account linked successfully, {user.name}! 🔨\n"
+                f"Welcome to your Proofwork Artisan dashboard.",
+                reply_markup=worker_main_menu(),
+            )
+        else:
+            await message.answer(
+                f"Account linked successfully, {user.name}! 💼\n"
+                f"Welcome to your Proofwork Client dashboard.",
+                reply_markup=client_main_menu(),
+            )
+        return
 
     await message.answer(
         f"Phone number verified: *{clean_phone}* ✅\n\n"

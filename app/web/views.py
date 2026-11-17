@@ -15,6 +15,19 @@ router = APIRouter(tags=["Web Views"])
 report_service = ReportService()
 
 
+@router.get("/checkout/{job_id}/status")
+async def checkout_job_status(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Public poll endpoint for the checkout page to check if payment arrived."""
+    stmt = select(Job.status).where(Job.id == job_id)
+    status_val = (await db.execute(stmt)).scalar_one_or_none()
+    if not status_val:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": status_val}
+
+
 @router.get("/checkout/{job_id}", response_class=HTMLResponse)
 async def checkout_page(
     job_id: uuid.UUID,
@@ -50,7 +63,7 @@ async def checkout_page(
         <script>
             setInterval(async () => {
                 try {
-                    const res = await fetch('/jobs/' + window.JOB_ID);
+                    const res = await fetch('/checkout/' + window.JOB_ID + '/status');
                     if (res.ok) {
                         const data = await res.json();
                         if (data.status === 'FUNDED' || data.status === 'COMPLETED') {
