@@ -46,6 +46,7 @@ class User(Base, TimestampMixin):
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True, nullable=True)
     phone: Mapped[str] = mapped_column(String(20), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(150), nullable=False)
+    pin_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Role flags

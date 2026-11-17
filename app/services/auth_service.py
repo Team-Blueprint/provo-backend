@@ -1,6 +1,7 @@
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,12 +15,16 @@ from app.core.security import (
     decode_access_token,
     generate_otp_code,
     hash_otp_code,
+    hash_pin,
     verify_otp_code,
+    verify_pin,
 )
 from app.core.utils import normalize_phone_number
 from app.db.models import AuthOTP, ClientProfile, User, WorkerProfile
 from app.integrations.sms.client import SMSClient
-from app.services.funding_service import FundingService
+
+if TYPE_CHECKING:
+    from app.services.funding_service import FundingService
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +47,17 @@ class AuthService:
         db: AsyncSession,
         name: str,
         phone: str,
+        pin: str,
         role: str = "worker",  # "worker" or "client"
         trade: str | None = None,
     ) -> tuple[AuthOTP, str]:
         """
-        Initiates passwordless registration:
-        Creates an unverified user record and sends a 6-digit OTP via SMS.
+        Initiates passwordless registration with a 6-digit security PIN:
+        Creates an unverified user record with pin_hash and sends a 6-digit OTP via SMS.
         """
         clean_phone = normalize_phone_number(phone)
         clean_name = name.strip()
+        hashed_pin = hash_pin(pin)
 
         # Check existing user
         stmt = select(User).where(User.phone == clean_phone)
@@ -66,6 +73,7 @@ class AuthService:
             user = User(
                 name=clean_name,
                 phone=clean_phone,
+                pin_hash=hashed_pin,
                 is_phone_verified=False,
                 is_worker=is_worker,
                 is_client=is_client,
@@ -86,6 +94,7 @@ class AuthService:
             await db.flush()
         else:
             user.name = clean_name
+            user.pin_hash = hashed_pin
             if is_worker and trade and user.worker_profile:
                 user.worker_profile.trade = trade.strip()
             await db.flush()
@@ -97,28 +106,41 @@ class AuthService:
         )
         return otp_record, raw_code
 
-    async def request_login(
+    async def login_with_pin(
         self,
         db: AsyncSession,
         phone: str,
-    ) -> tuple[AuthOTP, str]:
+        pin: str,
+    ) -> tuple[User, str, str]:
         """
-        Initiates passwordless login:
-        Checks that user exists and dispatches an OTP via SMS.
+        Direct PIN Login:
+        Validates the user's 6-digit PIN and immediately issues access and refresh tokens.
+        No OTP required.
         """
         clean_phone = normalize_phone_number(phone)
-        stmt = select(User).where(User.phone == clean_phone)
+        stmt = (
+            select(User)
+            .where(User.phone == clean_phone)
+            .options(selectinload(User.worker_profile), selectinload(User.client_profile))
+        )
         user = (await db.execute(stmt)).scalar_one_or_none()
 
         if not user:
-            raise ValueError("Phone number not registered. Please sign up first.")
+            raise ValueError("Invalid phone number or PIN.")
 
-        otp_record, raw_code = await self._create_and_send_otp(
-            db=db,
-            phone=clean_phone,
-            purpose=OTPPurpose.LOGIN.value,
+        if not user.pin_hash or not verify_pin(pin, user.pin_hash):
+            raise ValueError("Invalid phone number or PIN.")
+
+        if not user.is_phone_verified:
+            raise ValueError("Account not yet verified. Please verify your phone number with OTP first.")
+
+        access_token = create_access_token(
+            data={"sub": str(user.id), "phone": user.phone, "name": user.name}
         )
-        return otp_record, raw_code
+        refresh_token = create_refresh_token(
+            data={"sub": str(user.id), "phone": user.phone}
+        )
+        return user, access_token, refresh_token
 
     async def resend_otp(
         self,

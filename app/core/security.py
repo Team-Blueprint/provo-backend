@@ -32,6 +32,19 @@ def verify_otp_code(code: str, hashed_code: str) -> bool:
     return hmac.compare_digest(candidate_hash.lower(), hashed_code.lower())
 
 
+def hash_pin(pin: str) -> str:
+    """Hashes a 6-digit user PIN using salted SHA-256."""
+    secret = settings.JWT_SECRET_KEY or "provo-secret-salt"
+    salted = f"{secret}:{pin.strip()}"
+    return hashlib.sha256(salted.encode("utf-8")).hexdigest()
+
+
+def verify_pin(pin: str, hashed_pin: str) -> bool:
+    """Constant-time verification of a 6-digit PIN against its stored hash."""
+    candidate_hash = hash_pin(pin)
+    return hmac.compare_digest(candidate_hash.lower(), hashed_pin.lower())
+
+
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
     """Creates a signed JWT access token for authenticated sessions."""
     to_encode = data.copy()

@@ -26,6 +26,11 @@ router = Router()
 release_service = ReleaseService()
 
 
+def get_funding_service():
+    from app.services.funding_service import FundingService
+    return FundingService()
+
+
 @router.message(CommandStart())
 async def handle_start(message: Message) -> None:
     """Welcomes the user and initializes onboarding or main dashboard."""
@@ -275,6 +280,84 @@ async def handle_client_posted_jobs(message: Message) -> None:
             )
 
         await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(F.text == "💳 Fund a Job")
+async def handle_fund_a_job(message: Message) -> None:
+    """Lists client jobs awaiting funding with payment instructions and details."""
+    tg_id = message.from_user.id if message.from_user else 0
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == tg_id)
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user:
+            await message.answer("Please send /start to register first.")
+            return
+
+        job_stmt = (
+            select(Job)
+            .where(
+                Job.client_id == user.id,
+                Job.status.in_([JobStatus.DRAFT.value, JobStatus.AWAITING_FUNDING.value, JobStatus.PARTIALLY_FUNDED.value]),
+            )
+            .options(selectinload(Job.worker), selectinload(Job.client))
+            .order_by(Job.created_at.desc())
+        )
+        jobs = list((await session.execute(job_stmt)).scalars().all())
+
+        if not jobs:
+            await message.answer(
+                "You have no jobs awaiting funding right now.\n\n"
+                "All your posted jobs are either already funded or completed! 🛡️"
+            )
+            return
+
+        for job in jobs:
+            # If still DRAFT without virtual account, initialize escrow request
+            if not job.paga_account_number and job.status == JobStatus.DRAFT.value:
+                try:
+                    funding_service = get_funding_service()
+                    job = await funding_service.initiate_job_escrow(session, job.id)
+                    await session.commit()
+                except Exception as e:
+                    logger.warning("Could not initiate escrow for job %s: %s", job.id, e)
+
+            amount_naira = kobo_to_naira_str(job.total_kobo)
+            worker_name = job.worker.name if job.worker else "Assigned Artisan"
+            account_num = job.paga_account_number or "Processing..."
+
+            msg_text = (
+                f"💳 *Escrow Payment Details for {job.trade}*\n\n"
+                f"• *Job:* {job.description}\n"
+                f"• *Artisan:* {worker_name}\n"
+                f"• *Total Amount:* *{amount_naira}*\n"
+                f"• *Status:* `{job.status}`\n\n"
+                f"🏦 *Bank Transfer Instructions:*\n"
+                f"• *Bank Name:* `Paga`\n"
+                f"• *Account Number:* `{account_num}`\n\n"
+                f"💡 _Transfer the exact amount to the account above. Once the transfer lands, "
+                f"funds are safely locked in escrow and the artisan will be notified to start work._"
+            )
+            await message.answer(msg_text, parse_mode="Markdown")
+
+
+@router.message(F.text == "ℹ️ Help")
+async def handle_help_menu(message: Message) -> None:
+    """Provides general help and guide for both clients and artisans."""
+    help_text = (
+        "🛡️ *Welcome to Provo Help & Support*\n\n"
+        "Provo is a daily milestone escrow platform designed for informal artisans and clients.\n\n"
+        "• *For Clients:*\n"
+        "  1. Tap *📋 My Posted Jobs* to see your jobs and status.\n"
+        "  2. Tap *💳 Fund a Job* to get bank transfer details to lock funds in escrow.\n"
+        "  3. Review and confirm daily work notifications to release artisan pay.\n\n"
+        "• *For Artisans:*\n"
+        "  1. Tap *💼 My Active Jobs* to view funded jobs.\n"
+        "  2. Tap *✅ Done Today* to submit milestone completion.\n"
+        "  3. Tap *📊 My Credit Record* to see your verified credit readiness rating.\n\n"
+        "Need additional assistance? Contact support@provo.app"
+    )
+    await message.answer(help_text, parse_mode="Markdown")
 
 
 @router.message(F.text == "✅ Done Today")

@@ -28,8 +28,8 @@ async def signup(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Unified Passwordless Signup:
-    Registers a new worker or client profile and dispatches a 6-digit OTP via SMS.
+    Unified Signup with 6-Digit PIN:
+    Registers a new worker or client profile with a security PIN and dispatches a 6-digit OTP via SMS.
     Returns the otp_code in response for immediate testing convenience.
     """
     try:
@@ -37,6 +37,7 @@ async def signup(
             db=db,
             name=payload.name,
             phone=payload.phone,
+            pin=payload.pin,
             role=payload.role,
             trade=payload.trade.value if payload.trade else None,
         )
@@ -50,26 +51,33 @@ async def signup(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.post("/login", response_model=OTPResponse)
+@router.post("/login", response_model=TokenResponse)
 async def login(
     payload: LoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Passwordless Login:
-    Checks user registration and dispatches a fresh 6-digit OTP via SMS.
-    Returns the otp_code in response for immediate testing convenience.
+    Direct PIN-based Login:
+    Authenticates with registered phone number and 6-digit PIN.
+    Immediately returns JWT access and refresh tokens without requiring OTP verification.
     """
     try:
-        _otp, otp_code = await auth_service.request_login(db=db, phone=payload.phone)
-        return OTPResponse(
+        user, access_token, refresh_token = await auth_service.login_with_pin(
+            db=db,
             phone=payload.phone,
-            message="Login verification code sent via SMS.",
-            expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
-            otp_code=otp_code,
+            pin=payload.pin,
+        )
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user_id=user.id,
+            name=user.name,
+            phone=user.phone,
+            is_worker=user.is_worker,
+            is_client=user.is_client,
         )
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
 
 
 @router.post("/resend-otp", response_model=OTPResponse)

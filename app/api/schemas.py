@@ -11,6 +11,7 @@ class SignupRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str = Field(..., min_length=2, max_length=150)
     phone: str = Field(..., description="Phone number in national or E.164 format")
+    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="6-digit security PIN")
     role: str = Field("worker", description="'worker' or 'client'")
     trade: TradeType | None = Field(None, description="Artisan track if role is worker")
 
@@ -18,6 +19,7 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     phone: str = Field(..., description="Phone number in national or E.164 format")
+    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="6-digit security PIN")
 
 
 class ResendOTPRequest(BaseModel):
