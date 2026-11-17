@@ -47,12 +47,28 @@ class Settings(BaseSettings):
     TELEGRAM_WEBHOOK_SECRET: str = ""
     TELEGRAM_BOT_USERNAME: str = "proofwork_bot"
 
-    # Paga Configuration (Your 3 Paga keys: Public, Secret, Hash)
+    # Paga Configuration (supports PAGA_PUBLIC_KEY or PAGA_PRINCIPAL, PAGA_SECRET_KEY or PAGA_CREDENTIALS, PAGA_HASH_KEY or PAGA_HMAC_KEY)
     PAGA_USE_MOCK: bool = True
     PAGA_SANDBOX_BASE_URL: str = "https://beta.mypaga.com/paga-webservices/business-rest"
     PAGA_PUBLIC_KEY: str = ""
     PAGA_SECRET_KEY: str = ""
     PAGA_HASH_KEY: str = ""
+    PAGA_PRINCIPAL: str = ""
+    PAGA_CREDENTIALS: str = ""
+    PAGA_API_KEY: str = ""
+    PAGA_HMAC_KEY: str = ""
+
+    @property
+    def paga_principal(self) -> str:
+        return self.PAGA_PRINCIPAL or self.PAGA_PUBLIC_KEY or self.PAGA_API_KEY
+
+    @property
+    def paga_credentials(self) -> str:
+        return self.PAGA_CREDENTIALS or self.PAGA_SECRET_KEY
+
+    @property
+    def paga_hash_key(self) -> str:
+        return self.PAGA_HMAC_KEY or self.PAGA_HASH_KEY
 
     # httpSMS Configuration
     HTTPSMS_API_KEY: str = ""

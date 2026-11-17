@@ -4,11 +4,15 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.jobs import router as jobs_router
+from app.api.reports import router as reports_router
 from app.api.webhooks import router as webhooks_router
+from app.api.workers import router as workers_router
 from app.core.config import settings
 from app.core.database import Base, engine
+from app.web.views import router as web_router
 
 
 @asynccontextmanager
@@ -38,7 +42,11 @@ app.add_middleware(
 # Mount Clean Domain API Routers
 app.include_router(auth_router)
 app.include_router(jobs_router)
+app.include_router(workers_router)
+app.include_router(reports_router)
+app.include_router(admin_router)
 app.include_router(webhooks_router)
+app.include_router(web_router)
 
 
 @app.get("/health", tags=["Health"])

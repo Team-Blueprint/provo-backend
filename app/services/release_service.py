@@ -227,6 +227,53 @@ class ReleaseService:
         logger.warning("Job %s Day %s disputed by %s: %s", job.id, day_number, actor_user_id, reason)
         return day, dispute
 
+    async def check_and_settle_job(self, db: AsyncSession, job_id: uuid.UUID) -> Receipt | None:
+        """Checks if all days in a job are settled (PAID or CANCELLED) and mints receipt if ready."""
+        stmt = (
+            select(Job)
+            .where(Job.id == job_id)
+            .options(
+                selectinload(Job.days_schedule),
+                selectinload(Job.worker),
+                selectinload(Job.receipt),
+            )
+        )
+        job = (await db.execute(stmt)).scalar_one_or_none()
+        if not job or job.receipt:
+            return job.receipt if job else None
+
+        all_settled = all(
+            d.status in (DayStatus.PAID.value, DayStatus.CONFIRMED.value, DayStatus.AUTO_RELEASED.value, "CANCELLED")
+            for d in job.days_schedule
+        )
+        if all_settled:
+            now = datetime.now(UTC)
+            job.status = transition_job_state(job.status, JobEvent.ALL_DAYS_SETTLED).value
+            receipt_num = f"PW-{now.strftime('%Y')}-{uuid.uuid4().hex[:8].upper()}"
+            worker_name = job.worker.name if job.worker else "Artisan"
+
+            receipt = Receipt(
+                receipt_number=receipt_num,
+                job_id=job.id,
+                issued_at=now,
+                receipt_data={
+                    "receipt_number": receipt_num,
+                    "job_id": str(job.id),
+                    "trade": job.trade,
+                    "description": job.description,
+                    "total_kobo": job.total_kobo,
+                    "total_naira": kobo_to_naira_str(job.total_kobo),
+                    "days": job.days,
+                    "worker_name": worker_name,
+                    "completed_at": now.isoformat(),
+                },
+            )
+            db.add(receipt)
+            await db.flush()
+            logger.info("Settled Job %s and minted Receipt %s", job.id, receipt_num)
+            return receipt
+        return None
+
     async def auto_release_day(
         self,
         db: AsyncSession,

@@ -7,19 +7,6 @@ from app.core.enums import DayStatus, JobStatus, TradeType
 
 
 # --- Auth Schemas ---
-class WorkerSignupRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    name: str = Field(..., min_length=2, max_length=150)
-    phone: str = Field(..., description="Phone number in national or E.164 format")
-    trade: TradeType = Field(..., description="Artisan track (e.g. BRICKLAYING, PLUMBING, etc.)")
-
-
-class ClientSignupRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    name: str = Field(..., min_length=2, max_length=150)
-    phone: str = Field(..., description="Phone number in national or E.164 format")
-
-
 class SignupRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str = Field(..., min_length=2, max_length=150)
@@ -33,20 +20,32 @@ class LoginRequest(BaseModel):
     phone: str = Field(..., description="Phone number in national or E.164 format")
 
 
+class ResendOTPRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    phone: str = Field(..., description="Phone number in national or E.164 format")
+
+
 class VerifyOTPRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     phone: str
     code: str = Field(..., min_length=4, max_length=10)
 
 
+class RefreshTokenRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    refresh_token: str
+
+
 class OTPResponse(BaseModel):
     phone: str
     message: str
     expires_in_minutes: int
+    otp_code: str | None = Field(None, description="OTP code included for convenience during development/testing")
 
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
     user_id: uuid.UUID
     name: str
@@ -117,3 +116,36 @@ class ReceiptResponse(BaseModel):
     job_id: uuid.UUID
     issued_at: Any
     receipt_data: dict[str, Any]
+
+
+# --- Worker Directory & Sharing Schemas ---
+class WorkerDirectoryItem(BaseModel):
+    id: uuid.UUID
+    name: str
+    trade: str
+    area: str
+    verified_days_count: int
+    badge_grade: str
+
+
+class CreateShareRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    purpose: str = Field("Lender Credit Evaluation", min_length=3, max_length=150)
+    valid_days: int = Field(7, ge=1, le=30)
+
+
+class ShareResponse(BaseModel):
+    token: str
+    report_url: str
+    expires_at: str
+    purpose: str
+
+
+# --- Admin Dispute Resolution Schemas ---
+class DisputeResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    action: str = Field(..., description="'RELEASE_TO_WORKER', 'REFUND_TO_CLIENT', or 'SPLIT'")
+    resolution_note: str = Field(..., min_length=5, max_length=500)
+    worker_amount_kobo: int | None = None
+    client_amount_kobo: int | None = None
+

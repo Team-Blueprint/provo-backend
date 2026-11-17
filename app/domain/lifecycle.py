@@ -36,6 +36,7 @@ JOB_TRANSITION_MAP: dict[JobStatus, dict[JobEvent, JobStatus]] = {
     },
     JobStatus.FUNDED: {
         JobEvent.START_WORK: JobStatus.IN_PROGRESS,
+        JobEvent.ALL_DAYS_SETTLED: JobStatus.COMPLETED,
         JobEvent.CANCEL: JobStatus.CANCELLED,
         JobEvent.DISPUTE_RAISED: JobStatus.DISPUTED,
     },
@@ -45,7 +46,9 @@ JOB_TRANSITION_MAP: dict[JobStatus, dict[JobEvent, JobStatus]] = {
     },
     JobStatus.COMPLETED: {},  # Terminal
     JobStatus.CANCELLED: {},  # Terminal
-    JobStatus.DISPUTED: {},   # Terminal unless resolved
+    JobStatus.DISPUTED: {
+        JobEvent.ALL_DAYS_SETTLED: JobStatus.COMPLETED,
+    },
 }
 
 # Allowed Day transitions: current_status -> {event: next_status}

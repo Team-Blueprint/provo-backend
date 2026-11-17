@@ -130,20 +130,26 @@ class FundingService:
         db.add(payment_in)
         await db.flush()
 
-        # Check exact funding match
-        if amount_kobo == job.total_kobo:
-            job.status = transition_job_state(job.status, JobEvent.PAYMENT_RECEIVED).value
+        # Compute cumulative received funds across all payments for this job (Spec: Section 4)
+        stmt_all = select(PaymentIn).where(PaymentIn.job_id == job.id)
+        all_payments = list((await db.execute(stmt_all)).scalars().all())
+        cumulative_kobo = sum(p.amount_kobo for p in all_payments)
+        prev_kobo = cumulative_kobo - amount_kobo
+        now = datetime.now(UTC)
 
-            # Record internal ledger entry
+        if cumulative_kobo == job.total_kobo:
+            # Case A: Exact Match
+            if job.status != JobStatus.FUNDED.value:
+                job.status = transition_job_state(job.status, JobEvent.PAYMENT_RECEIVED).value
+
             ledger = LedgerEntry(
                 job_id=job.id,
                 kind=LedgerKind.FUNDED.value,
                 amount_kobo=amount_kobo,
-                created_at=datetime.now(UTC),
+                created_at=now,
             )
             db.add(ledger)
 
-            # Ensure Day 1 is in PENDING state
             if job.days_schedule:
                 day_1 = job.days_schedule[0]
                 day_1.status = DayStatus.PENDING.value
@@ -155,27 +161,97 @@ class FundingService:
                 actor="PAGA_WEBHOOK",
                 payload={
                     "paga_event_id": paga_event_id,
-                    "amount_kobo": amount_kobo,
+                    "cumulative_kobo": cumulative_kobo,
                     "status": job.status,
                 },
             )
             db.add(audit)
-            logger.info("Job %s funded with %s kobo. Status -> %s", job.id, amount_kobo, job.status)
-        else:
-            logger.warning(
-                "Job %s funding mismatch! Expected %s kobo, got %s kobo.",
-                job.id,
-                job.total_kobo,
-                amount_kobo,
+            logger.info("Job %s fully funded (exact %s kobo). Status -> FUNDED", job.id, cumulative_kobo)
+
+        elif cumulative_kobo < job.total_kobo:
+            # Case B: Underfunding (e.g. split bank transfers or fee deduction)
+            remaining_kobo = job.total_kobo - cumulative_kobo
+            ledger = LedgerEntry(
+                job_id=job.id,
+                kind=LedgerKind.PARTIAL_FUNDED.value,
+                amount_kobo=amount_kobo,
+                created_at=now,
             )
+            db.add(ledger)
+
             audit = AuditEvent(
                 entity_name="jobs",
                 entity_id=str(job.id),
-                action="FUNDING_AMOUNT_MISMATCH",
+                action="PARTIAL_ESCROW_FUNDED",
                 actor="PAGA_WEBHOOK",
-                payload={"expected_kobo": job.total_kobo, "received_kobo": amount_kobo},
+                payload={
+                    "paga_event_id": paga_event_id,
+                    "received_kobo": amount_kobo,
+                    "cumulative_kobo": cumulative_kobo,
+                    "remaining_kobo": remaining_kobo,
+                },
             )
             db.add(audit)
+            logger.warning(
+                "Job %s partially funded. Received %s of %s kobo (%s kobo remaining). Status remains %s",
+                job.id,
+                cumulative_kobo,
+                job.total_kobo,
+                remaining_kobo,
+                job.status,
+            )
+
+        else:
+            # Case C: Overfunding (cumulative_kobo > job.total_kobo)
+            if job.status != JobStatus.FUNDED.value:
+                job.status = transition_job_state(job.status, JobEvent.PAYMENT_RECEIVED).value
+
+            if job.days_schedule:
+                day_1 = job.days_schedule[0]
+                day_1.status = DayStatus.PENDING.value
+
+            needed_kobo = max(0, job.total_kobo - prev_kobo)
+            excess_kobo = amount_kobo - needed_kobo
+
+            if needed_kobo > 0:
+                db.add(
+                    LedgerEntry(
+                        job_id=job.id,
+                        kind=LedgerKind.FUNDED.value,
+                        amount_kobo=needed_kobo,
+                        created_at=now,
+                    )
+                )
+
+            if excess_kobo > 0:
+                db.add(
+                    LedgerEntry(
+                        job_id=job.id,
+                        kind=LedgerKind.EXCESS_HELD.value,
+                        amount_kobo=excess_kobo,
+                        created_at=now,
+                    )
+                )
+
+            audit = AuditEvent(
+                entity_name="jobs",
+                entity_id=str(job.id),
+                action="ESCROW_OVERFUNDED",
+                actor="PAGA_WEBHOOK",
+                payload={
+                    "paga_event_id": paga_event_id,
+                    "cumulative_kobo": cumulative_kobo,
+                    "total_required_kobo": job.total_kobo,
+                    "excess_kobo": excess_kobo,
+                },
+            )
+            db.add(audit)
+            logger.info(
+                "Job %s overfunded. Total %s kobo locked; %s kobo held as excess for refund.",
+                job.id,
+                job.total_kobo,
+                excess_kobo,
+            )
 
         await db.flush()
         return job, payment_in

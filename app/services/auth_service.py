@@ -10,6 +10,8 @@ from app.core.config import settings
 from app.core.enums import OTPPurpose
 from app.core.security import (
     create_access_token,
+    create_refresh_token,
+    decode_access_token,
     generate_otp_code,
     hash_otp_code,
     verify_otp_code,
@@ -32,7 +34,7 @@ class AuthService:
         phone: str,
         role: str = "worker",  # "worker" or "client"
         trade: str | None = None,
-    ) -> AuthOTP:
+    ) -> tuple[AuthOTP, str]:
         """
         Initiates passwordless registration:
         Creates an unverified user record and sends a 6-digit OTP via SMS.
@@ -78,17 +80,18 @@ class AuthService:
                 user.worker_profile.trade = trade.strip()
             await db.flush()
 
-        return await self._create_and_send_otp(
+        otp_record, raw_code = await self._create_and_send_otp(
             db=db,
             phone=clean_phone,
             purpose=OTPPurpose.SIGNUP.value,
         )
+        return otp_record, raw_code
 
     async def request_login(
         self,
         db: AsyncSession,
         phone: str,
-    ) -> AuthOTP:
+    ) -> tuple[AuthOTP, str]:
         """
         Initiates passwordless login:
         Checks that user exists and dispatches an OTP via SMS.
@@ -100,18 +103,43 @@ class AuthService:
         if not user:
             raise ValueError("Phone number not registered. Please sign up first.")
 
-        return await self._create_and_send_otp(
+        otp_record, raw_code = await self._create_and_send_otp(
             db=db,
             phone=clean_phone,
             purpose=OTPPurpose.LOGIN.value,
         )
+        return otp_record, raw_code
+
+    async def resend_otp(
+        self,
+        db: AsyncSession,
+        phone: str,
+    ) -> tuple[AuthOTP, str]:
+        """
+        Resends an OTP to a registered user who has not yet completed verification,
+        or who is logging in.
+        """
+        clean_phone = normalize_phone_number(phone)
+        stmt = select(User).where(User.phone == clean_phone)
+        user = (await db.execute(stmt)).scalar_one_or_none()
+
+        if not user:
+            raise ValueError("Phone number not registered. Please sign up first.")
+
+        purpose = OTPPurpose.LOGIN.value if user.is_phone_verified else OTPPurpose.SIGNUP.value
+        otp_record, raw_code = await self._create_and_send_otp(
+            db=db,
+            phone=clean_phone,
+            purpose=purpose,
+        )
+        return otp_record, raw_code
 
     async def _create_and_send_otp(
         self,
         db: AsyncSession,
         phone: str,
         purpose: str,
-    ) -> AuthOTP:
+    ) -> tuple[AuthOTP, str]:
         """Generates, records, and sends an SMS OTP."""
         raw_code = generate_otp_code(digits=6)
         hashed_code = hash_otp_code(raw_code)
@@ -131,17 +159,17 @@ class AuthService:
         # Send via SMS
         msg = f"Your Proofwork verification code is {raw_code}. Valid for {settings.OTP_EXPIRE_MINUTES} minutes."
         await self.sms_client.send_sms(to_phone=phone, message=msg)
-        return otp_record
+        return otp_record, raw_code
 
     async def verify_otp(
         self,
         db: AsyncSession,
         phone: str,
         code: str,
-    ) -> tuple[User, str]:
+    ) -> tuple[User, str, str]:
         """
         Validates the submitted OTP.
-        On success, activates phone verification and returns (User, JWT_Token).
+        On success, activates phone verification and returns (User, access_token, refresh_token).
         """
         clean_phone = normalize_phone_number(phone)
         clean_code = code.strip()
@@ -189,10 +217,39 @@ class AuthService:
         user.is_phone_verified = True
         await db.flush()
 
-        token = create_access_token(
+        access_token = create_access_token(
             data={"sub": str(user.id), "phone": user.phone, "name": user.name}
         )
-        return user, token
+        refresh_token = create_refresh_token(
+            data={"sub": str(user.id), "phone": user.phone}
+        )
+        return user, access_token, refresh_token
+
+    async def refresh_access_token(
+        self,
+        db: AsyncSession,
+        refresh_token: str,
+    ) -> tuple[User, str, str]:
+        """Validates a refresh token and returns (User, new_access_token, new_refresh_token)."""
+        try:
+            payload = decode_access_token(refresh_token)
+        except Exception as e:
+            raise ValueError(f"Invalid or expired refresh token: {e}")
+
+        if payload.get("type") != "refresh":
+            raise ValueError("Provided token is not a refresh token")
+
+        user_id_str = payload.get("sub")
+        if not user_id_str:
+            raise ValueError("Token missing user subject")
+
+        user = await self.get_user_by_id(db, uuid.UUID(user_id_str))
+        if not user:
+            raise ValueError("User not found")
+
+        new_access = create_access_token({"sub": str(user.id), "phone": user.phone, "name": user.name})
+        new_refresh = create_refresh_token({"sub": str(user.id), "phone": user.phone})
+        return user, new_access, new_refresh
 
     async def get_user_by_id(self, db: AsyncSession, user_id: uuid.UUID) -> User | None:
         stmt = (

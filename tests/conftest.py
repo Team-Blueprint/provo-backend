@@ -1,8 +1,18 @@
 import asyncio
+
+# Force test database and mock Paga adapter during automated test runs
+import os
 from collections.abc import AsyncGenerator
+
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_proofwork.db"
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.core.config import settings
+
+settings.PAGA_USE_MOCK = True
+settings.DATABASE_URL = "sqlite+aiosqlite:///./test_proofwork.db"
 
 # Import all models so metadata is completely populated
 import app.models  # noqa: F401

@@ -71,6 +71,7 @@ async def test_passwordless_signup_and_verify_otp_flow():
         assert verify_res.status_code == 200
         token_data = verify_res.json()
         assert "access_token" in token_data
+        assert "refresh_token" in token_data
         assert token_data["is_worker"] is True
         assert token_data["name"] == "Babatunde Alabi"
 
@@ -100,34 +101,68 @@ async def test_passwordless_login_for_registered_user():
         login_res = await client.post("/auth/login", json={"phone": "+2348099998888"})
         assert login_res.status_code == 200
         assert "Login verification code sent" in login_res.json()["message"]
+        assert login_res.json()["otp_code"] is not None
+
+        # Resend OTP succeeds
+        resend_res = await client.post("/auth/resend-otp", json={"phone": "+2348099998888"})
+        assert resend_res.status_code == 200
+        assert "Fresh verification code" in resend_res.json()["message"]
+        assert resend_res.json()["otp_code"] is not None
 
 
 @pytest.mark.asyncio
-async def test_dedicated_worker_and_client_signup_endpoints():
+async def test_unified_worker_and_client_signup_and_refresh():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Worker signup with artisan track
         worker_res = await client.post(
-            "/auth/signup/worker",
+            "/auth/signup",
             json={
                 "name": "Emem Udoh",
                 "phone": "+2348077778888",
+                "role": "worker",
                 "trade": "BRICKLAYING",
             },
         )
         assert worker_res.status_code == 201
-        assert "artisan profile" in worker_res.json()["message"]
+        worker_data = worker_res.json()
+        assert worker_data["otp_code"] is not None
 
         # Client signup
         client_res = await client.post(
-            "/auth/signup/client",
+            "/auth/signup",
             json={
                 "name": "Chief Bassey",
                 "phone": "+2348022223333",
+                "role": "client",
             },
         )
         assert client_res.status_code == 201
-        assert "client account" in client_res.json()["message"]
+        client_data = client_res.json()
+        assert client_data["otp_code"] is not None
+
+        # Verify client OTP to get real refresh_token
+        verify_client = await client.post(
+            "/auth/verify-otp",
+            json={
+                "phone": "+2348022223333",
+                "code": client_data["otp_code"],
+            },
+        )
+        assert verify_client.status_code == 200
+        client_tokens = verify_client.json()
+        assert client_tokens["access_token"] is not None
+        assert client_tokens["refresh_token"] is not None
+
+        # Test token refresh endpoint
+        refresh_res = await client.post(
+            "/auth/refresh",
+            json={"refresh_token": client_tokens["refresh_token"]},
+        )
+        assert refresh_res.status_code == 200
+        refreshed_data = refresh_res.json()
+        assert refreshed_data["access_token"] is not None
+        assert refreshed_data["refresh_token"] is not None
 
         # Verify worker profile created with trade in DB
         from sqlalchemy import select

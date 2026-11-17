@@ -22,9 +22,9 @@ class RealPagaAdapter(PagaAdapter):
 
     def __init__(self) -> None:
         self.base_url = settings.PAGA_SANDBOX_BASE_URL.rstrip("/")
-        self.public_key = settings.PAGA_PUBLIC_KEY
-        self.secret_key = settings.PAGA_SECRET_KEY
-        self.hash_key = settings.PAGA_HASH_KEY
+        self.public_key = settings.paga_principal
+        self.secret_key = settings.paga_credentials
+        self.hash_key = settings.paga_hash_key
 
     def _compute_hash(self, *values: Any) -> str:
         """Concatenates parameters with Hash Key and returns SHA-512 hex digest."""
@@ -71,9 +71,19 @@ class RealPagaAdapter(PagaAdapter):
         }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+            except httpx.HTTPStatusError as exc:
+                err_body = exc.response.text
+                logger.error("Paga API Error [%s]: %s", exc.response.status_code, err_body)
+                raise ValueError(
+                    f"Paga API returned {exc.response.status_code}: {err_body}"
+                ) from exc
+            except httpx.RequestError as exc:
+                logger.error("Paga network error: %s", str(exc))
+                raise ValueError(f"Unable to reach Paga service: {exc}") from exc
 
         payment_url = data.get("paymentUrl") or f"{self.base_url}/pay/{reference}"
         account_number = data.get("accountNumber") or ""
@@ -121,9 +131,19 @@ class RealPagaAdapter(PagaAdapter):
         }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+            except httpx.HTTPStatusError as exc:
+                err_body = exc.response.text
+                logger.error("Paga API Error [%s]: %s", exc.response.status_code, err_body)
+                raise ValueError(
+                    f"Paga API returned {exc.response.status_code}: {err_body}"
+                ) from exc
+            except httpx.RequestError as exc:
+                logger.error("Paga network error: %s", str(exc))
+                raise ValueError(f"Unable to reach Paga service: {exc}") from exc
 
         return PagaPayoutResult(
             payout_ref=payout_ref,

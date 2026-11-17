@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.enums import DayStatus, JobStatus
+from app.core.enums import DayStatus, JobStatus, TradeType
 from app.db.models import AuditEvent, Job, JobDay
 from app.domain.ledger import partition_daily_pay
 
@@ -76,6 +76,68 @@ class JobService:
             client_id,
         )
         return job
+
+    async def list_jobs(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID | None = None,
+        is_admin: bool = False,
+        status: JobStatus | None = None,
+        trade: TradeType | None = None,
+        worker_id: uuid.UUID | None = None,
+        client_id: uuid.UUID | None = None,
+        supervisor_id: uuid.UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Job]:
+        """
+        Lists jobs with filtering and pagination.
+        Non-admin users can see jobs where they are the client, worker, or supervisor,
+        or public jobs needing an artisan (e.g., worker_id is None).
+        """
+        stmt = (
+            select(Job)
+            .options(
+                selectinload(Job.client),
+                selectinload(Job.worker),
+                selectinload(Job.supervisor),
+                selectinload(Job.days_schedule),
+                selectinload(Job.ledger_entries),
+                selectinload(Job.payments_in),
+                selectinload(Job.receipt),
+            )
+            .order_by(Job.created_at.desc())
+        )
+
+        # Access scope: if not admin and user_id is provided, limit to jobs they are party to,
+        # or jobs currently unassigned/open
+        if not is_admin and user_id:
+            from sqlalchemy import or_
+
+            stmt = stmt.where(
+                or_(
+                    Job.client_id == user_id,
+                    Job.worker_id == user_id,
+                    Job.supervisor_id == user_id,
+                    Job.worker_id.is_(None),  # open job marketplace
+                )
+            )
+
+        # Filters
+        if status:
+            stmt = stmt.where(Job.status == status.value)
+        if trade:
+            stmt = stmt.where(Job.trade == trade.value)
+        if worker_id:
+            stmt = stmt.where(Job.worker_id == worker_id)
+        if client_id:
+            stmt = stmt.where(Job.client_id == client_id)
+        if supervisor_id:
+            stmt = stmt.where(Job.supervisor_id == supervisor_id)
+
+        stmt = stmt.limit(limit).offset(offset)
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
 
     async def get_job_by_id(self, db: AsyncSession, job_id: uuid.UUID) -> Job | None:
         stmt = (

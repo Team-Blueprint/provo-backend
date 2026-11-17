@@ -54,6 +54,7 @@ async_session_factory = async_sessionmaker(
     autoflush=False,
 )
 AsyncSessionLocal = async_session_factory
+async_session_maker = async_session_factory
 
 
 class Base(DeclarativeBase):

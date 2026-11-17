@@ -1,111 +1,25 @@
-import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
-    ClientSignupRequest,
     LoginRequest,
     OTPResponse,
+    RefreshTokenRequest,
+    ResendOTPRequest,
     SignupRequest,
     TokenResponse,
     UserProfileResponse,
     VerifyOTPRequest,
-    WorkerSignupRequest,
 )
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import decode_access_token
+from app.core.dependencies import get_current_user
 from app.db.models import User
 from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 auth_service = AuthService()
-
-
-async def get_current_user(
-    authorization: str | None = Header(None),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    """FastAPI dependency resolving the authenticated User from the Bearer token."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
-        )
-
-    token = authorization.split(" ")[1]
-    try:
-        payload = decode_access_token(token)
-        user_id_str = payload.get("sub")
-        if not user_id_str:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token payload missing subject identifier",
-            )
-        user = await auth_service.get_user_by_id(db, uuid.UUID(user_id_str))
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-            )
-        return user
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {e}",
-        )
-
-
-@router.post("/signup/worker", response_model=OTPResponse, status_code=status.HTTP_201_CREATED)
-async def signup_worker(
-    payload: WorkerSignupRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Worker Signup:
-    Registers an artisan with Name, Phone, and Artisan Track (trade), then sends SMS OTP.
-    """
-    try:
-        await auth_service.request_signup(
-            db=db,
-            name=payload.name,
-            phone=payload.phone,
-            role="worker",
-            trade=payload.trade.value,
-        )
-        return OTPResponse(
-            phone=payload.phone,
-            message="Verification code sent via SMS. Enter OTP to activate your artisan profile.",
-            expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-
-@router.post("/signup/client", response_model=OTPResponse, status_code=status.HTTP_201_CREATED)
-async def signup_client(
-    payload: ClientSignupRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Client Signup:
-    Registers a client with Name and Phone, then sends SMS OTP.
-    """
-    try:
-        await auth_service.request_signup(
-            db=db,
-            name=payload.name,
-            phone=payload.phone,
-            role="client",
-        )
-        return OTPResponse(
-            phone=payload.phone,
-            message="Verification code sent via SMS. Enter OTP to activate your client account.",
-            expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.post("/signup", response_model=OTPResponse, status_code=status.HTTP_201_CREATED)
@@ -116,9 +30,10 @@ async def signup(
     """
     Unified Passwordless Signup:
     Registers a new worker or client profile and dispatches a 6-digit OTP via SMS.
+    Returns the otp_code in response for immediate testing convenience.
     """
     try:
-        _otp = await auth_service.request_signup(
+        _otp, otp_code = await auth_service.request_signup(
             db=db,
             name=payload.name,
             phone=payload.phone,
@@ -129,6 +44,7 @@ async def signup(
             phone=payload.phone,
             message="Verification code sent via SMS.",
             expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
+            otp_code=otp_code,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -142,13 +58,36 @@ async def login(
     """
     Passwordless Login:
     Checks user registration and dispatches a fresh 6-digit OTP via SMS.
+    Returns the otp_code in response for immediate testing convenience.
     """
     try:
-        _otp = await auth_service.request_login(db=db, phone=payload.phone)
+        _otp, otp_code = await auth_service.request_login(db=db, phone=payload.phone)
         return OTPResponse(
             phone=payload.phone,
             message="Login verification code sent via SMS.",
             expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
+            otp_code=otp_code,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/resend-otp", response_model=OTPResponse)
+async def resend_otp(
+    payload: ResendOTPRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Resend OTP:
+    Dispatches a fresh OTP if the previous code expired before verification.
+    """
+    try:
+        _otp, otp_code = await auth_service.resend_otp(db=db, phone=payload.phone)
+        return OTPResponse(
+            phone=payload.phone,
+            message="Fresh verification code dispatched via SMS.",
+            expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
+            otp_code=otp_code,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -161,16 +100,17 @@ async def verify_otp(
 ):
     """
     OTP Verification:
-    Validates submitted SMS code and returns signed JWT access token.
+    Validates submitted SMS code and returns signed JWT access token and refresh token.
     """
     try:
-        user, token = await auth_service.verify_otp(
+        user, access_token, refresh_token = await auth_service.verify_otp(
             db=db,
             phone=payload.phone,
             code=payload.code,
         )
         return TokenResponse(
-            access_token=token,
+            access_token=access_token,
+            refresh_token=refresh_token,
             user_id=user.id,
             name=user.name,
             phone=user.phone,
@@ -179,6 +119,33 @@ async def verify_otp(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token_endpoint(
+    payload: RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Token Refresh:
+    Exchanges a valid refresh token for a fresh access token and refresh token pair.
+    """
+    try:
+        user, access_token, refresh_token = await auth_service.refresh_access_token(
+            db=db,
+            refresh_token=payload.refresh_token,
+        )
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user_id=user.id,
+            name=user.name,
+            phone=user.phone,
+            is_worker=user.is_worker,
+            is_client=user.is_client,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
 
 
 @router.get("/me", response_model=UserProfileResponse)

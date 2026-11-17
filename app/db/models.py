@@ -134,6 +134,14 @@ class Job(Base, TimestampMixin):
     ledger_entries: Mapped[list[LedgerEntry]] = relationship("LedgerEntry", back_populates="job")
     receipt: Mapped[Receipt | None] = relationship("Receipt", back_populates="job", uselist=False)
 
+    @property
+    def days_count(self) -> int:
+        return self.days
+
+    @property
+    def days_list(self) -> list[JobDay]:
+        return self.days_schedule
+
 
 class JobDay(Base, TimestampMixin):
     """Daily work slice governed by the 24-hour confirm/auto-release decision window."""

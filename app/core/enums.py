@@ -38,8 +38,14 @@ class DayStatus(str, Enum):
 
 class LedgerKind(str, Enum):
     FUNDED = "FUNDED"
+    PARTIAL_FUNDED = "PARTIAL_FUNDED"
+    EXCESS_HELD = "EXCESS_HELD"
     RELEASED = "RELEASED"
     REFUNDED = "REFUNDED"
+
+
+# Compatibility alias
+LedgerEntryType = LedgerKind
 
 
 class PayoutStatus(str, Enum):
