@@ -141,6 +141,8 @@ class WorkerDirectoryItem(BaseModel):
     area: str
     verified_days_count: int
     badge_grade: str
+    paga_account_number: str | None = None
+    paga_payment_url: str | None = None
 
 
 class CreateShareRequest(BaseModel):
@@ -164,3 +166,12 @@ class DisputeResolveRequest(BaseModel):
     worker_amount_kobo: int | None = None
     client_amount_kobo: int | None = None
 
+
+# --- Worker Payment Link Schema ---
+class WorkerPaymentLinkResponse(BaseModel):
+    worker_id: str
+    worker_name: str
+    account_number: str
+    bank: str = "Paga"
+    payment_url: str
+    share_text: str

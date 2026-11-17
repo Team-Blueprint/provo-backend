@@ -89,6 +89,10 @@ class WorkerProfile(Base, TimestampMixin):
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, index=True, nullable=False)
     extra_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # Personal Paga Collect virtual account for direct payments to this worker
+    paga_account_number: Mapped[str | None] = mapped_column(String(30), nullable=True, unique=True, index=True)
+    paga_payment_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
     user: Mapped[User] = relationship("User", back_populates="worker_profile")
 
 

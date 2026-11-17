@@ -19,6 +19,7 @@ from app.core.security import (
 from app.core.utils import normalize_phone_number
 from app.db.models import AuthOTP, ClientProfile, User, WorkerProfile
 from app.integrations.sms.client import SMSClient
+from app.services.funding_service import FundingService
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,15 @@ logger = logging.getLogger(__name__)
 class AuthService:
     def __init__(self, sms_client: SMSClient | None = None) -> None:
         self.sms_client = sms_client or SMSClient()
+        self._funding_service: FundingService | None = None
+
+    @property
+    def funding_service(self) -> FundingService:
+        # Lazy to avoid circular imports at module load time
+        if self._funding_service is None:
+            from app.services.funding_service import FundingService
+            self._funding_service = FundingService()
+        return self._funding_service
 
     async def request_signup(
         self,
@@ -157,7 +167,7 @@ class AuthService:
         await db.flush()
 
         # Send via SMS
-        msg = f"Your Proofwork verification code is {raw_code}. Valid for {settings.OTP_EXPIRE_MINUTES} minutes."
+        msg = f"Your Provo verification code is {raw_code}. Valid for {settings.OTP_EXPIRE_MINUTES} minutes."
         await self.sms_client.send_sms(to_phone=phone, message=msg)
         return otp_record, raw_code
 
@@ -195,7 +205,9 @@ class AuthService:
         if otp_record.attempts >= settings.OTP_MAX_ATTEMPTS:
             raise ValueError("Maximum verification attempts reached. Please request a new OTP.")
 
-        if not verify_otp_code(clean_code, otp_record.code_hash):
+        # Demo mode: "123456" is accepted as a universal bypass OTP
+        is_demo_bypass = settings.DEMO_MODE and clean_code == "123456"
+        if not is_demo_bypass and not verify_otp_code(clean_code, otp_record.code_hash):
             otp_record.attempts += 1
             await db.flush()
             remaining = settings.OTP_MAX_ATTEMPTS - otp_record.attempts
@@ -216,6 +228,14 @@ class AuthService:
         user = (await db.execute(user_stmt)).scalar_one()
         user.is_phone_verified = True
         await db.flush()
+
+        # Provision personal Paga account for new workers (runs once; idempotent after)
+        if user.is_worker and user.worker_profile:
+            try:
+                await self.funding_service.provision_worker_paga_account(db=db, user_id=user.id)
+            except Exception as e:
+                # Non-fatal: log and continue — worker can still use the app
+                logger.warning("Could not provision Paga account for worker %s: %s", user.id, e)
 
         access_token = create_access_token(
             data={"sub": str(user.id), "phone": user.phone, "name": user.name}

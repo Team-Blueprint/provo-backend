@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Proofwork Backend"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
+    DEMO_MODE: bool = False  # When True: OTP is always "123456" for any phone number
 
     @field_validator("DEBUG", mode="before")
     @classmethod

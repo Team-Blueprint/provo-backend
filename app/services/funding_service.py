@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.enums import DayStatus, JobStatus, LedgerKind
-from app.db.models import AuditEvent, Job, LedgerEntry, PaymentIn
+from app.db.models import AuditEvent, Job, LedgerEntry, PaymentIn, WorkerProfile
 from app.domain.lifecycle import JobEvent, transition_job_state
 from app.integrations.paga import PagaAdapter, get_paga_adapter
 from app.integrations.sms.client import SMSClient
@@ -46,7 +46,7 @@ class FundingService:
             amount_kobo=job.total_kobo,
             client_phone=job.client.phone if job.client else "",
             client_name=job.client.name if job.client else "Client",
-            description=f"Proofwork Escrow for {job.trade}: {job.description}",
+            description=f"Provo Escrow for {job.trade}: {job.description}",
             callback_url=callback_url,
         )
 
@@ -69,6 +69,50 @@ class FundingService:
 
         logger.info("Initiated escrow funding for Job %s (ref=%s)", job.id, job.funding_reference)
         return job
+
+    async def provision_worker_paga_account(self, db: AsyncSession, user_id: uuid.UUID) -> WorkerProfile:
+        """
+        Creates a persistent personal Paga Collect virtual account for a worker.
+        Called once after OTP verification for new workers.
+        Idempotent: skips if account already provisioned.
+        """
+        stmt = (
+            select(WorkerProfile)
+            .where(WorkerProfile.user_id == user_id)
+            .options(selectinload(WorkerProfile.user))
+        )
+        profile = (await db.execute(stmt)).scalar_one_or_none()
+        if not profile:
+            raise ValueError(f"WorkerProfile not found for user {user_id}")
+
+        # Already provisioned — idempotent
+        if profile.paga_account_number:
+            logger.info("Worker %s already has Paga account %s", user_id, profile.paga_account_number)
+            return profile
+
+        worker = profile.user
+        # Use a stable reference keyed to the user so we never double-create
+        reference = f"WORKER-{str(user_id).replace('-', '').upper()[:20]}"
+
+        callback_url = f"{settings.BASE_URL}/webhooks/paga"
+        result = await self.paga_adapter.create_escrow_payment_request(
+            reference=reference,
+            amount_kobo=100,  # Paga requires amount > 0; ₦1 placeholder for open account
+            client_phone=worker.phone,
+            client_name=worker.name,
+            description=f"Provo personal payment account for {worker.name}",
+            callback_url=callback_url,
+        )
+
+        profile.paga_account_number = result.account_number
+        profile.paga_payment_url = f"{settings.BASE_URL}/pay/{result.account_number}"
+        await db.flush()
+
+        logger.info(
+            "Provisioned personal Paga account %s for worker %s",
+            result.account_number, user_id,
+        )
+        return profile
 
     async def process_paga_webhook(
         self,
@@ -197,6 +241,7 @@ class FundingService:
 
             # Notify assigned worker via SMS & Telegram
             await self._notify_worker_funded(job)
+            await self._notify_client_funded(job)
 
         elif cumulative_kobo < job.total_kobo:
             # Case B: Underfunding (e.g. split bank transfers or fee deduction)
@@ -285,6 +330,7 @@ class FundingService:
 
             # Notify assigned worker via SMS & Telegram
             await self._notify_worker_funded(job)
+            await self._notify_client_funded(job)
 
         await db.flush()
         return job, payment_in
@@ -297,7 +343,7 @@ class FundingService:
         worker = job.worker
         amount_naira = f"₦{job.total_kobo / 100:,.2f}"
         msg_text = (
-            f"[Proofwork] Job funded! {amount_naira} has been locked in escrow for '{job.trade}'. "
+            f"[Provo] Job funded! {amount_naira} has been locked in escrow for '{job.trade}'. "
             f"It is safe to begin Day 1 work."
         )
 
@@ -322,3 +368,39 @@ class FundingService:
                 logger.info("Sent job funded Telegram alert to worker %s", worker.telegram_user_id)
             except Exception as e:
                 logger.warning("Failed to send Telegram alert to worker %s: %s", worker.telegram_user_id, e)
+
+
+    async def _notify_client_funded(self, job: Job) -> None:
+        """Dispatches Telegram confirmation to the client that their escrow deposit was received."""
+        if not job.client:
+            return
+
+        client = job.client
+        amount_naira = f"₦{job.total_kobo / 100:,.2f}"
+
+        # SMS to client
+        if client.phone:
+            try:
+                sms_text = (
+                    f"[Provo] Payment received! {amount_naira} is now locked in escrow "
+                    f"for your {job.trade} job. The artisan has been notified to begin work."
+                )
+                await self.sms_client.send_sms(to_phone=client.phone, message=sms_text)
+                logger.info("Sent escrow receipt SMS to client %s", client.phone)
+            except Exception as e:
+                logger.warning("Failed to dispatch receipt SMS to client %s: %s", client.phone, e)
+
+        # Telegram to client
+        if client.telegram_user_id and bot:
+            try:
+                tg_text = (
+                    f"✅ *Payment Received!*\n\n"
+                    f"Your deposit of *{amount_naira}* is now locked in escrow for:\n"
+                    f"🛠 *{job.trade}*: {job.description}\n\n"
+                    f"The artisan has been notified and work can begin.\n"
+                    f"You will be asked to confirm each day's work before funds are released."
+                )
+                await bot.send_message(chat_id=client.telegram_user_id, text=tg_text, parse_mode="Markdown")
+                logger.info("Sent escrow receipt Telegram alert to client %s", client.telegram_user_id)
+            except Exception as e:
+                logger.warning("Failed to send Telegram alert to client %s: %s", client.telegram_user_id, e)

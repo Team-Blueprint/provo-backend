@@ -39,7 +39,7 @@ def trade_selection_keyboard() -> InlineKeyboardMarkup:
 def client_main_menu() -> ReplyKeyboardMarkup:
     """Main dashboard menu for clients."""
     kb = [
-        [KeyboardButton(text="🔨 New Escrow Job"), KeyboardButton(text="📋 My Jobs")],
+        [KeyboardButton(text="📋 My Posted Jobs"), KeyboardButton(text="💳 Fund a Job")],
         [KeyboardButton(text="ℹ️ Help")],
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)

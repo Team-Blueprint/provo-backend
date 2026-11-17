@@ -43,6 +43,7 @@ async def test_cumulative_split_funding_and_overfunding():
                 "total_kobo": 4200000,
                 "days": 2,
                 "worker_id": str(worker_id),
+                "auto_fund_request": False,
             },
         )
         assert create_res.status_code == 201

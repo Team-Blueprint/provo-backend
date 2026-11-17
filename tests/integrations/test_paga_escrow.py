@@ -53,6 +53,7 @@ async def test_job_creation_and_paga_escrow_funding_flow():
             "total_kobo": 6000000,  # 60,000 NGN
             "days": 3,
             "worker_id": str(worker_id),
+            "auto_fund_request": False,
         }
         res = await client.post(
             "/jobs",
@@ -71,7 +72,10 @@ async def test_job_creation_and_paga_escrow_funding_flow():
         funding_ref = job_data["funding_reference"]
 
         # 4. Request Escrow Funding Link & NUBAN
-        fund_req_res = await client.post(f"/jobs/{job_id}/fund-request")
+        fund_req_res = await client.post(
+            f"/jobs/{job_id}/fund-request",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert fund_req_res.status_code == 200
         funded_info = fund_req_res.json()
         assert funded_info["status"] == "AWAITING_FUNDING"
@@ -131,3 +135,25 @@ async def test_job_creation_and_paga_escrow_funding_flow():
         async with AsyncSessionLocal() as session:
             entries = list((await session.execute(ledger_stmt)).scalars().all())
             assert len(entries) == 1
+
+        # 8. Test List Jobs Endpoint with filters
+        list_res = await client.get("/jobs", headers={"Authorization": f"Bearer {token}"})
+        assert list_res.status_code == 200
+        jobs_list = list_res.json()
+        assert len(jobs_list) == 1
+        assert jobs_list[0]["id"] == str(job_id)
+
+        # Filter by status match
+        filter_status = await client.get("/jobs?status=FUNDED", headers={"Authorization": f"Bearer {token}"})
+        assert filter_status.status_code == 200
+        assert len(filter_status.json()) == 1
+
+        # Filter by status mismatch
+        filter_mismatch = await client.get("/jobs?status=COMPLETED", headers={"Authorization": f"Bearer {token}"})
+        assert filter_mismatch.status_code == 200
+        assert len(filter_mismatch.json()) == 0
+
+        # Filter by trade
+        filter_trade = await client.get("/jobs?trade=BRICKLAYING", headers={"Authorization": f"Bearer {token}"})
+        assert filter_trade.status_code == 200
+        assert len(filter_trade.json()) == 1

@@ -17,6 +17,7 @@ from app.db.models import (
     LedgerEntry,
     Payout,
     Receipt,
+    User,
 )
 from app.domain.ledger import validate_ledger_invariant
 from app.domain.lifecycle import (
@@ -132,9 +133,9 @@ class ReleaseService:
             select(Job)
             .where(Job.id == job_id)
             .options(
-                selectinload(Job.days_schedule).selectinload(JobDay.worker),
+                selectinload(Job.days_schedule).selectinload(JobDay.worker).selectinload(User.worker_profile),
                 selectinload(Job.ledger_entries),
-                selectinload(Job.worker),
+                selectinload(Job.worker).selectinload(User.worker_profile),
                 selectinload(Job.receipt),
             )
         )
@@ -288,9 +289,9 @@ class ReleaseService:
             select(JobDay)
             .where(JobDay.id == day_id)
             .options(
-                selectinload(JobDay.job).selectinload(Job.days_schedule),
+                selectinload(JobDay.job).selectinload(Job.days_schedule).selectinload(JobDay.worker).selectinload(User.worker_profile),
                 selectinload(JobDay.job).selectinload(Job.ledger_entries),
-                selectinload(JobDay.job).selectinload(Job.worker),
+                selectinload(JobDay.job).selectinload(Job.worker).selectinload(User.worker_profile),
                 selectinload(JobDay.job).selectinload(Job.receipt),
             )
         )
@@ -372,11 +373,15 @@ class ReleaseService:
 
         # 4. Trigger Paga Payout to the day's designated artisan (or fallback to job artisan)
         artisan = day.worker or job.worker
-        destination = (
-            artisan.payout_account_number
-            if artisan and artisan.payout_account_number
-            else "9900000001"
-        )
+        destination = None
+        if artisan:
+            if artisan.worker_profile and artisan.worker_profile.paga_account_number:
+                destination = artisan.worker_profile.paga_account_number
+            elif artisan.payout_account_number:
+                destination = artisan.payout_account_number
+        if not destination:
+            destination = "9900000001"
+
         bank_code = (
             artisan.payout_bank_code
             if artisan and artisan.payout_bank_code

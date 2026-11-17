@@ -9,6 +9,7 @@ from app.api.schemas import (
     CreateShareRequest,
     ShareResponse,
     WorkerDirectoryItem,
+    WorkerPaymentLinkResponse,
 )
 from app.core.config import settings
 from app.core.database import get_db
@@ -78,6 +79,8 @@ async def list_available_workers(
                 area=prof.area,
                 verified_days_count=verified_days,
                 badge_grade=badge,
+                paga_account_number=prof.paga_account_number,
+                paga_payment_url=prof.paga_payment_url,
             )
         )
 
@@ -201,4 +204,45 @@ async def create_share_link(
         report_url=report_url,
         expires_at=consent.expires_at.isoformat(),
         purpose=consent.purpose,
+    )
+
+
+@router.get("/{worker_id}/payment-link", response_model=WorkerPaymentLinkResponse)
+async def get_worker_payment_link(
+    worker_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> WorkerPaymentLinkResponse:
+    """
+    Returns the worker's personal Paga virtual account number and shareable payment link.
+    Public endpoint — anyone can fetch this to pay a worker directly.
+    """
+    stmt = (
+        select(User)
+        .where(User.id == worker_id)
+        .options(selectinload(User.worker_profile))
+    )
+    worker = (await db.execute(stmt)).scalar_one_or_none()
+
+    if not worker or not worker.is_worker:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Worker not found.",
+        )
+
+    profile = worker.worker_profile
+    if not profile or not profile.paga_account_number:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This worker does not yet have a personal payment account. They may need to log in once to activate it.",
+        )
+
+    payment_url = profile.paga_payment_url or f"{settings.BASE_URL}/pay/{profile.paga_account_number}"
+
+    return WorkerPaymentLinkResponse(
+        worker_id=str(worker.id),
+        worker_name=worker.name,
+        account_number=profile.paga_account_number,
+        bank="Paga",
+        payment_url=payment_url,
+        share_text=f"Pay {worker.name} via Provo: Transfer to Paga account {profile.paga_account_number}",
     )

@@ -54,8 +54,8 @@ async def handle_start(message: Message) -> None:
 
     # User not yet registered on Telegram
     await message.answer(
-        "Welcome to *Proofwork*! 🛡️\n\n"
-        "Proofwork holds client payments in escrow, releases funds daily as work is confirmed, "
+        "Welcome to *Provo*! 🛡️\n\n"
+        "Provo holds client payments in escrow, releases funds daily as work is confirmed, "
         "and creates verified records that lenders can trust.\n\n"
         "To get started, please tap the button below to share and verify your phone number:",
         parse_mode="Markdown",
@@ -102,20 +102,20 @@ async def handle_contact_share(message: Message) -> None:
         if user.is_worker:
             await message.answer(
                 f"Account linked successfully, {user.name}! 🔨\n"
-                f"Welcome to your Proofwork Artisan dashboard.",
+                f"Welcome to your Provo Artisan dashboard.",
                 reply_markup=worker_main_menu(),
             )
         else:
             await message.answer(
                 f"Account linked successfully, {user.name}! 💼\n"
-                f"Welcome to your Proofwork Client dashboard.",
+                f"Welcome to your Provo Client dashboard.",
                 reply_markup=client_main_menu(),
             )
         return
 
     await message.answer(
         f"Phone number verified: *{clean_phone}* ✅\n\n"
-        "Are you using Proofwork as an Artisan (to do work and earn) or as a Client (to hire artisans)?",
+        "Are you using Provo as an Artisan (to do work and earn) or as a Client (to hire artisans)?",
         parse_mode="Markdown",
         reply_markup=role_selection_keyboard(),
     )
@@ -159,7 +159,7 @@ async def handle_role_selection(query: CallbackQuery) -> None:
             await session.commit()
 
             await query.message.edit_text(
-                "Welcome as a Proofwork Client! 💼\n"
+                "Welcome as a Provo Client! 💼\n"
                 "You can now create escrow-backed jobs for artisans.",
                 reply_markup=None,
             )
@@ -190,7 +190,7 @@ async def handle_trade_selection(query: CallbackQuery) -> None:
 
     await query.message.edit_text(
         f"Artisan Track selected: *{selected_trade.capitalize()}* 🔨\n\n"
-        "Your profile is active! When clients hire you through Proofwork, you will see your jobs here.",
+        "Your profile is active! When clients hire you through Provo, you will see your jobs here.",
         parse_mode="Markdown",
     )
     await query.message.answer("Artisan Dashboard:", reply_markup=worker_main_menu())
@@ -199,7 +199,7 @@ async def handle_trade_selection(query: CallbackQuery) -> None:
 
 @router.message(F.text == "💼 My Active Jobs")
 async def handle_my_active_jobs(message: Message) -> None:
-    """Lists current active escrow jobs for the artisan."""
+    """Lists current active escrow jobs for the artisan (worker view)."""
     tg_id = message.from_user.id if message.from_user else 0
 
     async with async_session_factory() as session:
@@ -222,7 +222,7 @@ async def handle_my_active_jobs(message: Message) -> None:
         if not jobs:
             await message.answer(
                 "You have no active escrow jobs right now.\n"
-                "Tell your client to hire you on Proofwork or enter your phone number when creating a job!"
+                "Tell your client to hire you on Provo or enter your phone number when creating a job!"
             )
             return
 
@@ -232,6 +232,46 @@ async def handle_my_active_jobs(message: Message) -> None:
                 f"• *{job.trade}*: {job.description}\n"
                 f"  Total Locked: {kobo_to_naira_str(job.total_kobo)} ({job.days} day(s))\n"
                 f"  Status: `{job.status}`\n\n"
+            )
+
+        await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(F.text == "📋 My Posted Jobs")
+async def handle_client_posted_jobs(message: Message) -> None:
+    """Lists jobs the client has posted with escrow funding status."""
+    tg_id = message.from_user.id if message.from_user else 0
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == tg_id)
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user:
+            await message.answer("Please send /start to register first.")
+            return
+
+        job_stmt = (
+            select(Job)
+            .where(Job.client_id == user.id)
+            .options(selectinload(Job.days_schedule), selectinload(Job.worker))
+            .order_by(Job.created_at.desc())
+        )
+        jobs = list((await session.execute(job_stmt)).scalars().all())
+
+        if not jobs:
+            await message.answer(
+                "You have not posted any jobs yet.\n"
+                "Create a job on the Provo app to get started!"
+            )
+            return
+
+        text = "📋 *Your Posted Jobs:*\n\n"
+        for job in jobs:
+            worker_name = job.worker.name if job.worker else "Not assigned"
+            text += (
+                f"• *{job.trade}*: {job.description}\n"
+                f"  Total: {kobo_to_naira_str(job.total_kobo)} | Status: `{job.status}`\n"
+                f"  Artisan: {worker_name}\n"
+                f"  Account: `{job.paga_account_number or 'pending'}`\n\n"
             )
 
         await message.answer(text, parse_mode="Markdown")
@@ -322,7 +362,7 @@ async def handle_my_record(message: Message) -> None:
         score_res = calculate_worker_score(history)
 
         reply_text = (
-            f"📊 *Proofwork Verified Record for {user.name}:*\n\n"
+            f"📊 *Provo Verified Record for {user.name}:*\n\n"
             f"• *Credit Score:* {score_res.score} / 100\n"
             f"• *Rating Tier:* `{score_res.band}`\n"
             f"• *Confirmed Days:* {score_res.confirmed_days}\n"
