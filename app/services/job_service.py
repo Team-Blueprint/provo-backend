@@ -191,3 +191,150 @@ class JobService:
         db.add(audit)
         await db.flush()
         return job
+
+    async def assign_worker_to_job(
+        self,
+        db: AsyncSession,
+        job_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        worker_phone: str | None = None,
+        worker_id: uuid.UUID | None = None,
+    ) -> Job:
+        """
+        Assigns (or re-assigns) an artisan to an existing unassigned job.
+        Only the job's employer can call this, and only while job is DRAFT, AWAITING_FUNDING, or FUNDED.
+        Accepts either worker_id or worker_phone.
+        """
+        from app.core.utils import normalize_phone_number
+        from app.db.models import User, WorkerProfile
+
+        if not worker_phone and not worker_id:
+            raise ValueError("Either worker_phone or worker_id must be provided.")
+
+        stmt = (
+            select(Job)
+            .where(Job.id == job_id)
+            .options(selectinload(Job.days_schedule), selectinload(Job.worker))
+        )
+        job = (await db.execute(stmt)).scalar_one_or_none()
+        if not job:
+            raise ValueError("Job not found.")
+        if job.client_id != actor_id:
+            raise ValueError("Only the job's employer can assign an artisan.")
+        if job.status not in (JobStatus.DRAFT.value, JobStatus.AWAITING_FUNDING.value, JobStatus.FUNDED.value):
+            raise ValueError("Can only assign an artisan before work starts (DRAFT, AWAITING_FUNDING, or FUNDED status).")
+        if job.worker_id is not None:
+            raise ValueError("An artisan is already assigned to this job. Remove them first.")
+
+        if worker_id:
+            worker_stmt = select(User).where(User.id == worker_id).options(selectinload(User.worker_profile))
+            worker = (await db.execute(worker_stmt)).scalar_one_or_none()
+            if not worker:
+                raise ValueError("Selected artisan not found.")
+            if not worker.is_worker:
+                worker.is_worker = True
+                if not worker.worker_profile:
+                    profile = WorkerProfile(user_id=worker.id, trade=job.trade)
+                    db.add(profile)
+                await db.flush()
+        else:
+            clean_phone = normalize_phone_number(worker_phone)
+            worker_stmt = select(User).where(User.phone == clean_phone).options(selectinload(User.worker_profile))
+            worker = (await db.execute(worker_stmt)).scalar_one_or_none()
+
+            if not worker:
+                worker = User(
+                    name=f"Artisan ({clean_phone[-4:]})",
+                    phone=clean_phone,
+                    is_phone_verified=False,
+                    is_worker=True,
+                )
+                db.add(worker)
+                await db.flush()
+                profile = WorkerProfile(user_id=worker.id, trade=job.trade)
+                db.add(profile)
+                await db.flush()
+            else:
+                if not worker.is_worker:
+                    worker.is_worker = True
+                    if not worker.worker_profile:
+                        profile = WorkerProfile(user_id=worker.id, trade=job.trade)
+                        db.add(profile)
+                    await db.flush()
+
+        job.worker_id = worker.id
+        # Also update any unassigned days (days with no worker_id set)
+        for day in job.days_schedule:
+            if day.worker_id is None:
+                day.worker_id = worker.id
+
+        audit = AuditEvent(
+            entity_name="jobs",
+            entity_id=str(job.id),
+            action="ASSIGN_WORKER",
+            actor=str(actor_id),
+            payload={
+                "worker_id": str(worker.id),
+                "worker_phone": worker.phone,
+            },
+        )
+        db.add(audit)
+        await db.flush()
+        return job
+
+    async def assign_supervisor(
+        self,
+        db: AsyncSession,
+        job_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        supervisor_name: str,
+        supervisor_phone: str,
+    ) -> Job:
+        """
+        Assigns an invited supervisor by name and phone number without requiring them to register.
+        Generates a unique supervisor_token if not already set.
+        Only the job's employer (client_id) or an admin can assign.
+        """
+        import secrets
+        from app.core.utils import normalize_phone_number
+        from app.db.models import User
+
+        stmt = (
+            select(Job)
+            .where(Job.id == job_id)
+            .options(
+                selectinload(Job.days_schedule),
+                selectinload(Job.worker),
+            )
+        )
+        job = (await db.execute(stmt)).scalar_one_or_none()
+        if not job:
+            raise ValueError("Job not found.")
+        if job.client_id != actor_id:
+            actor_stmt = select(User).where(User.id == actor_id)
+            actor = (await db.execute(actor_stmt)).scalar_one_or_none()
+            if not actor or not actor.is_admin:
+                raise ValueError("Unauthorized: Only the job's employer can assign a supervisor.")
+
+        clean_phone = normalize_phone_number(supervisor_phone)
+        clean_name = supervisor_name.strip()
+
+        job.supervisor_name = clean_name
+        job.supervisor_phone = clean_phone
+        if not job.supervisor_token:
+            job.supervisor_token = f"sup_{secrets.token_urlsafe(32)}"
+
+        audit = AuditEvent(
+            entity_name="jobs",
+            entity_id=str(job.id),
+            action="ASSIGN_SUPERVISOR",
+            actor=str(actor_id),
+            payload={
+                "supervisor_name": clean_name,
+                "supervisor_phone": clean_phone,
+                "supervisor_token": job.supervisor_token,
+            },
+        )
+        db.add(audit)
+        await db.flush()
+        return job

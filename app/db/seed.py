@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.core.database import async_session_maker
+from app.core.security import hash_pin
 from app.core.enums import DayStatus, JobStatus, LedgerKind, PayoutStatus, TradeType
 from app.db.models import (
     Consent,
@@ -49,6 +50,7 @@ async def seed_database():
             phone="+2348123456780",
             is_worker=True,
             is_phone_verified=True,
+            pin_hash=hash_pin("123456"),
             payout_account_number="9901122334",
             payout_bank_code="PAGA",
         )
@@ -73,7 +75,7 @@ async def seed_database():
         ]
         clients = []
         for name, phone in clients_data:
-            c = User(name=name, phone=phone, is_client=True, is_phone_verified=True)
+            c = User(name=name, phone=phone, is_client=True, is_phone_verified=True, pin_hash=hash_pin("123456"))
             session.add(c)
             clients.append(c)
         await session.flush()

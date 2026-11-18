@@ -18,7 +18,7 @@ settings.DATABASE_URL = "sqlite+aiosqlite:///./test_proofwork.db"
 import app.models  # noqa: F401
 from app.core.database import Base
 
-# Test async sqlite database
+# Test async sqlite database    
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
 
 test_engine = create_async_engine(

@@ -116,6 +116,9 @@ class Job(Base, TimestampMixin):
     client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), index=True, nullable=False)
     worker_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), index=True, nullable=True)
     supervisor_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), index=True, nullable=True)
+    supervisor_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    supervisor_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    supervisor_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
 
     trade: Mapped[str] = mapped_column(String(50), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -163,6 +166,7 @@ class JobDay(Base, TimestampMixin):
     release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
     decided_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    proof_photo: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     job: Mapped[Job] = relationship("Job", back_populates="days_schedule")

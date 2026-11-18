@@ -124,6 +124,7 @@ class ReleaseService:
         job_id: uuid.UUID,
         day_number: int,
         actor_user_id: uuid.UUID,
+        proof_photo: str | None = None,
     ) -> tuple[JobDay, Payout]:
         """
         Client or Supervisor confirms daily work.
@@ -143,11 +144,19 @@ class ReleaseService:
         if not job:
             raise ValueError("Job not found")
 
-        # Authorization: client or supervisor
+        # Authorization: client or supervisor (by supervisor_id or supervisor_phone)
         is_client = job.client_id == actor_user_id
-        is_supervisor = job.supervisor_id == actor_user_id if job.supervisor_id else False
+        is_supervisor = False
+        if job.supervisor_id and job.supervisor_id == actor_user_id:
+            is_supervisor = True
+        elif job.supervisor_phone:
+            actor_stmt = select(User.phone).where(User.id == actor_user_id)
+            actor_phone = (await db.execute(actor_stmt)).scalar_one_or_none()
+            if actor_phone and actor_phone == job.supervisor_phone:
+                is_supervisor = True
+
         if not (is_client or is_supervisor):
-            raise ValueError("Unauthorized: Only the job client or supervisor can confirm work.")
+            raise ValueError("Unauthorized: Only the job employer or supervisor can confirm work.")
 
         day = next((d for d in job.days_schedule if d.day_number == day_number), None)
         if not day:
@@ -157,6 +166,9 @@ class ReleaseService:
             raise ValueError(f"Cannot confirm day with status '{day.status}'")
 
         now = datetime.now(UTC)
+        if proof_photo:
+            day.proof_photo = proof_photo
+
         day.status = transition_day_state(day.status, DayEvent.CLIENT_CONFIRM).value
         day.decided_by = actor_user_id
         day.decided_at = now
@@ -192,9 +204,17 @@ class ReleaseService:
             raise ValueError("Job not found")
 
         is_client = job.client_id == actor_user_id
-        is_supervisor = job.supervisor_id == actor_user_id if job.supervisor_id else False
+        is_supervisor = False
+        if job.supervisor_id and job.supervisor_id == actor_user_id:
+            is_supervisor = True
+        elif job.supervisor_phone:
+            actor_stmt = select(User.phone).where(User.id == actor_user_id)
+            actor_phone = (await db.execute(actor_stmt)).scalar_one_or_none()
+            if actor_phone and actor_phone == job.supervisor_phone:
+                is_supervisor = True
+
         if not (is_client or is_supervisor):
-            raise ValueError("Unauthorized: Only client or supervisor can dispute work.")
+            raise ValueError("Unauthorized: Only employer or supervisor can dispute work.")
 
         day = next((d for d in job.days_schedule if d.day_number == day_number), None)
         if not day:
@@ -229,6 +249,134 @@ class ReleaseService:
 
         logger.warning("Job %s Day %s disputed by %s: %s", job.id, day_number, actor_user_id, reason)
         return day, dispute
+
+    async def supervisor_confirm_day(
+        self,
+        db: AsyncSession,
+        job_id: uuid.UUID,
+        day_number: int,
+        token: str,
+        phone: str | None = None,
+        proof_photo: str | None = None,
+    ) -> JobDay:
+        """
+        Public token-gated confirmation for invited site supervisors.
+        Optionally saves proof_photo and cross-checks phone number, then executes daily payout.
+        """
+        from app.core.utils import normalize_phone_number
+
+        stmt = (
+            select(Job)
+            .where(Job.id == job_id)
+            .options(
+                selectinload(Job.days_schedule).selectinload(JobDay.worker).selectinload(User.worker_profile),
+                selectinload(Job.ledger_entries),
+                selectinload(Job.worker).selectinload(User.worker_profile),
+                selectinload(Job.receipt),
+            )
+        )
+        job = (await db.execute(stmt)).scalar_one_or_none()
+        if not job:
+            raise LookupError("Job not found")
+
+        # Validate supervisor token
+        if not token or not job.supervisor_token or token.strip() != job.supervisor_token:
+            raise PermissionError("Invalid supervisor token")
+
+        # Optional phone cross-check
+        if phone:
+            clean_phone = normalize_phone_number(phone)
+            if not job.supervisor_phone or clean_phone != job.supervisor_phone:
+                raise PermissionError("Phone number does not match invited supervisor")
+
+        day = next((d for d in job.days_schedule if d.day_number == day_number), None)
+        if not day:
+            raise LookupError(f"Day {day_number} not found for this job")
+
+        if day.status != DayStatus.DONE_REPORTED.value:
+            raise ValueError(f"Cannot confirm day with status '{day.status}'")
+
+        now = datetime.now(UTC)
+        if proof_photo:
+            day.proof_photo = proof_photo
+
+        day.status = transition_day_state(day.status, DayEvent.CLIENT_CONFIRM).value
+        day.decided_by = job.supervisor_id or job.client_id
+        day.decided_at = now
+
+        supervisor_label = job.supervisor_name or "Invited Supervisor"
+        await self._settle_day_release(
+            db=db,
+            job=job,
+            day=day,
+            actor="SUPERVISOR",
+            reason=f"Day {day_number} confirmed by supervisor ({supervisor_label})",
+        )
+        return day
+
+    async def supervisor_dispute_day(
+        self,
+        db: AsyncSession,
+        job_id: uuid.UUID,
+        day_number: int,
+        token: str,
+        reason: str,
+    ) -> JobDay:
+        """
+        Public token-gated dispute for invited site supervisors.
+        Freezes the 24-hour auto-release countdown and records the dispute.
+        """
+        stmt = (
+            select(Job)
+            .where(Job.id == job_id)
+            .options(selectinload(Job.days_schedule))
+        )
+        job = (await db.execute(stmt)).scalar_one_or_none()
+        if not job:
+            raise LookupError("Job not found")
+
+        if not token or not job.supervisor_token or token.strip() != job.supervisor_token:
+            raise PermissionError("Invalid supervisor token")
+
+        day = next((d for d in job.days_schedule if d.day_number == day_number), None)
+        if not day:
+            raise LookupError(f"Day {day_number} not found for this job")
+
+        if day.status != DayStatus.DONE_REPORTED.value:
+            raise ValueError(f"Cannot dispute day with status '{day.status}'")
+
+        now = datetime.now(UTC)
+        day.status = transition_day_state(day.status, DayEvent.CLIENT_DISPUTE).value
+        day.release_at = None  # Freeze 24h timer
+        day.decided_by = job.supervisor_id or job.client_id
+        day.decided_at = now
+
+        dispute = Dispute(
+            day_id=day.id,
+            opened_by=job.supervisor_id or job.client_id,
+            reason=reason.strip(),
+            status=DisputeStatus.OPEN.value,
+        )
+        db.add(dispute)
+
+        audit = AuditEvent(
+            entity_name="job_days",
+            entity_id=str(day.id),
+            action="SUPERVISOR_DISPUTE_DAY_WORK",
+            actor=f"SUPERVISOR:{job.supervisor_phone or 'TOKEN'}",
+            payload={"reason": reason},
+        )
+        db.add(audit)
+        await db.flush()
+
+        logger.warning(
+            "Job %s Day %s disputed by supervisor (%s): %s",
+            job.id,
+            day_number,
+            job.supervisor_name,
+            reason,
+        )
+        return day
 
     async def check_and_settle_job(self, db: AsyncSession, job_id: uuid.UUID) -> Receipt | None:
         """Checks if all days in a job are settled (PAID or CANCELLED) and mints receipt if ready."""

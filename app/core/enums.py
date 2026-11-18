@@ -64,6 +64,7 @@ class OTPPurpose(str, Enum):
     SIGNUP = "SIGNUP"
     LOGIN = "LOGIN"
     PHONE_VERIFY = "PHONE_VERIFY"
+    SET_PIN = "SET_PIN"
 
 
 class MessageChannel(str, Enum):

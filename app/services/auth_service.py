@@ -64,6 +64,8 @@ class AuthService:
         user = (await db.execute(stmt)).scalar_one_or_none()
 
         if user and user.is_phone_verified:
+            if user.telegram_user_id is not None and not user.pin_hash:
+                raise ValueError("You registered via Telegram. Please set a 6-digit PIN to access the web app (visit /set-pin).")
             raise ValueError("An account with this phone number already exists. Please log in.")
 
         is_worker = role.lower() == "worker"
@@ -128,8 +130,14 @@ class AuthService:
         if not user:
             raise ValueError("Invalid phone number or PIN.")
 
-        if not user.pin_hash or not verify_pin(pin, user.pin_hash):
-            raise ValueError("Invalid phone number or PIN.")
+        is_demo_pin = settings.DEMO_MODE and pin == "123456"
+        if not is_demo_pin:
+            if not user.pin_hash:
+                if user.telegram_user_id is not None:
+                    raise ValueError("You registered via Telegram and have not set a web PIN yet. Please visit /set-pin to set your PIN.")
+                raise ValueError("Invalid phone number or PIN.")
+            if not verify_pin(pin, user.pin_hash):
+                raise ValueError("Invalid phone number or PIN.")
 
         if not user.is_phone_verified:
             raise ValueError("Account not yet verified. Please verify your phone number with OTP first.")
@@ -165,6 +173,95 @@ class AuthService:
             purpose=purpose,
         )
         return otp_record, raw_code
+
+    async def request_set_pin_otp(
+        self,
+        db: AsyncSession,
+        phone: str,
+    ) -> tuple[AuthOTP, str]:
+        """
+        Sends an OTP for Telegram-sourced accounts that need to set a web PIN.
+        Only valid if the user: (a) exists, (b) has a telegram_user_id set, (c) has no pin_hash yet.
+        """
+        clean_phone = normalize_phone_number(phone)
+        stmt = select(User).where(User.phone == clean_phone)
+        user = (await db.execute(stmt)).scalar_one_or_none()
+        if not user:
+            raise ValueError("No account found with that phone number.")
+        if user.telegram_user_id is None:
+            raise ValueError("This endpoint is for Telegram accounts without a web PIN. Please sign up normally.")
+        if user.pin_hash is not None:
+            raise ValueError("A PIN is already set for this account. Use the login page instead.")
+        otp_record, raw_code = await self._create_and_send_otp(
+            db=db,
+            phone=clean_phone,
+            purpose=OTPPurpose.SET_PIN.value,
+        )
+        return otp_record, raw_code
+
+    async def set_pin_for_telegram_user(
+        self,
+        db: AsyncSession,
+        phone: str,
+        otp_code: str,
+        new_pin: str,
+    ) -> tuple[User, str, str]:
+        """
+        Sets a web PIN for a Telegram-sourced account after OTP verification.
+        Returns (user, access_token, refresh_token) on success.
+        """
+        clean_phone = normalize_phone_number(phone)
+        clean_code = otp_code.strip()
+        now = datetime.now(UTC)
+
+        stmt = select(User).where(User.phone == clean_phone).options(
+            selectinload(User.worker_profile), selectinload(User.client_profile)
+        )
+        user = (await db.execute(stmt)).scalar_one_or_none()
+        if not user:
+            raise ValueError("No account found with that phone number.")
+        if user.telegram_user_id is None:
+            raise ValueError("This account was not created via Telegram.")
+
+        # Demo bypass
+        is_demo_bypass = settings.DEMO_MODE and clean_code == "123456"
+
+        if not is_demo_bypass:
+            otp_stmt = (
+                select(AuthOTP)
+                .where(
+                    AuthOTP.phone == clean_phone,
+                    AuthOTP.is_used == False,
+                    AuthOTP.purpose == OTPPurpose.SET_PIN.value,
+                )
+                .order_by(AuthOTP.created_at.desc())
+            )
+            otp_record = (await db.execute(otp_stmt)).scalars().first()
+            expires_at = otp_record.expires_at if otp_record else None
+            if expires_at and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if not otp_record or (expires_at and expires_at < now):
+                raise ValueError("OTP is invalid or has expired. Please request a new one.")
+            if otp_record.attempts >= settings.OTP_MAX_ATTEMPTS:
+                raise ValueError("Maximum verification attempts reached.")
+            if not verify_otp_code(clean_code, otp_record.code_hash):
+                otp_record.attempts += 1
+                await db.flush()
+                remaining = settings.OTP_MAX_ATTEMPTS - otp_record.attempts
+                raise ValueError(f"Incorrect OTP code. {remaining} attempt(s) remaining.")
+            otp_record.is_used = True
+
+        user.pin_hash = hash_pin(new_pin)
+        user.is_phone_verified = True
+        await db.flush()
+
+        access_token = create_access_token(
+            data={"sub": str(user.id), "phone": user.phone, "name": user.name}
+        )
+        refresh_token = create_refresh_token(
+            data={"sub": str(user.id), "phone": user.phone}
+        )
+        return user, access_token, refresh_token
 
     async def _create_and_send_otp(
         self,

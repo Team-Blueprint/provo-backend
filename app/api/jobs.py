@@ -7,11 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.schemas import (
+    AssignSupervisorRequest,
+    AssignWorkerRequest,
     DisputeRequest,
     JobCreateRequest,
     JobDayResponse,
     JobResponse,
     ReceiptResponse,
+    SupervisorConfirmDayRequest,
+    SupervisorDayScheduleItem,
+    SupervisorDisputeDayRequest,
+    SupervisorJobViewResponse,
 )
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
@@ -96,6 +102,169 @@ async def list_jobs(
         limit=min(limit, 100),
         offset=offset,
     )
+
+
+@router.post("/{job_id}/assign-worker", response_model=JobResponse)
+async def assign_worker(
+    job_id: uuid.UUID,
+    payload: AssignWorkerRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Assign an artisan to an existing unassigned job.
+    Only the job's employer can call this. Job must be in DRAFT, AWAITING_FUNDING, or FUNDED status.
+    """
+    try:
+        job = await job_service.assign_worker_to_job(
+            db=db,
+            job_id=job_id,
+            actor_id=current_user.id,
+            worker_phone=payload.worker_phone,
+            worker_id=payload.worker_id,
+        )
+        await db.commit()
+        return await job_service.get_job_by_id(db, job.id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{job_id}/supervisor", response_model=JobResponse)
+async def assign_supervisor(
+    job_id: uuid.UUID,
+    payload: AssignSupervisorRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Assign an invited site supervisor by name and phone number.
+    Generates a unique supervisor_token if not already set.
+    Only the job's employer or an admin can perform this.
+    """
+    try:
+        job = await job_service.assign_supervisor(
+            db=db,
+            job_id=job_id,
+            actor_id=current_user.id,
+            supervisor_name=payload.supervisor_name,
+            supervisor_phone=payload.supervisor_phone,
+        )
+        await db.commit()
+        return await job_service.get_job_by_id(db, job.id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.get("/{job_id}/supervisor-view", response_model=SupervisorJobViewResponse)
+async def get_supervisor_view(
+    job_id: uuid.UUID,
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Public token-gated endpoint for site supervisors.
+    Provides milestone breakdown and artisan info with zero client PII.
+    """
+    from app.db.models import Job
+    stmt = (
+        select(Job)
+        .where(Job.id == job_id)
+        .options(
+            selectinload(Job.days_schedule),
+            selectinload(Job.worker),
+        )
+    )
+    job = (await db.execute(stmt)).scalar_one_or_none()
+    if not job or not token or not job.supervisor_token or token.strip() != job.supervisor_token:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found or invalid token")
+
+    worker_name = job.worker.name if job.worker else None
+    schedule_items = [
+        SupervisorDayScheduleItem(
+            id=d.id,
+            day_number=d.day_number,
+            amount_kobo=d.amount_kobo,
+            status=d.status,
+            done_at=d.done_at,
+            release_at=d.release_at,
+            proof_photo=d.proof_photo,
+        )
+        for d in job.days_schedule
+    ]
+
+    return SupervisorJobViewResponse(
+        id=job.id,
+        trade=job.trade,
+        description=job.description,
+        total_kobo=job.total_kobo,
+        days_count=job.days,
+        status=job.status,
+        worker_name=worker_name,
+        supervisor_name=job.supervisor_name,
+        supervisor_phone=job.supervisor_phone,
+        days_schedule=schedule_items,
+    )
+
+
+@router.post("/{job_id}/days/{day_number}/supervisor-confirm", response_model=JobDayResponse)
+async def supervisor_confirm_day(
+    job_id: uuid.UUID,
+    day_number: int,
+    token: str,
+    payload: SupervisorConfirmDayRequest = SupervisorConfirmDayRequest(),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Supervisor confirms a day's work using their unique token.
+    Optionally attaches a proof photograph and triggers daily payout release.
+    """
+    try:
+        day = await release_service.supervisor_confirm_day(
+            db=db,
+            job_id=job_id,
+            day_number=day_number,
+            token=token,
+            phone=payload.phone,
+            proof_photo=payload.proof_photo,
+        )
+        await db.commit()
+        return day
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{job_id}/days/{day_number}/supervisor-dispute", response_model=JobDayResponse)
+async def supervisor_dispute_day(
+    job_id: uuid.UUID,
+    day_number: int,
+    token: str,
+    payload: SupervisorDisputeDayRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Supervisor disputes a day's work using their unique token.
+    Freezes the 24-hour auto-release countdown and records the dispute.
+    """
+    try:
+        day = await release_service.supervisor_dispute_day(
+            db=db,
+            job_id=job_id,
+            day_number=day_number,
+            token=token,
+            reason=payload.reason,
+        )
+        await db.commit()
+        return day
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.get("/{job_id}", response_model=JobResponse)

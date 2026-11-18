@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,13 +28,44 @@ async def checkout_job_status(
     return {"status": status_val}
 
 
+@router.post("/checkout/{job_id}/assign-worker")
+async def checkout_assign_worker(
+    job_id: uuid.UUID,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Allows employer on the web checkout page to assign an artisan to an unassigned job."""
+    worker_phone = payload.get("worker_phone")
+    if not worker_phone:
+        raise HTTPException(status_code=400, detail="Worker phone number is required")
+
+    stmt = select(Job).where(Job.id == job_id).options(selectinload(Job.worker))
+    job = (await db.execute(stmt)).scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    try:
+        from app.services.job_service import JobService
+        js = JobService()
+        job = await js.assign_worker_to_job(
+            db=db,
+            job_id=job_id,
+            actor_id=job.client_id,
+            worker_phone=worker_phone,
+        )
+        await db.commit()
+        return {"success": True, "worker_name": job.worker.name if job.worker else worker_phone}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/checkout/{job_id}", response_class=HTMLResponse)
 async def checkout_page(
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Client Escrow Funding Checkout page.
+    Employer Escrow Funding Checkout page.
     Displays one-time 10-digit virtual NUBAN, transfer instructions, and real-time escrow lock status.
     """
     stmt = (
@@ -47,7 +78,8 @@ async def checkout_page(
         raise HTTPException(status_code=404, detail="Job not found")
 
     amount_naira = f"₦{job.total_kobo / 100:,.2f}"
-    worker_name = job.worker.name if job.worker else "Assigned Artisan"
+    has_worker = job.worker is not None
+    worker_name = job.worker.name if has_worker else "Not yet assigned"
     account_number = job.paga_account_number or "9901234567"
     is_funded = job.status in [JobStatus.FUNDED.value, JobStatus.COMPLETED.value]
 
@@ -72,6 +104,52 @@ async def checkout_page(
                     }
                 } catch (e) {}
             }, 3000);
+        </script>
+        """
+
+    assign_box_html = ""
+    if not has_worker:
+        assign_box_html = """
+        <div id="assignArtisanBox" style="background: #EFF6FF; border: 1px solid #BFDBFE; border-radius: 12px; padding: 16px; margin: 16px 0;">
+            <div style="font-weight: 700; color: #1E40AF; font-size: 14px; margin-bottom: 4px;">👷 Assign Artisan</div>
+            <div style="font-size: 12px; color: #475569; margin-bottom: 10px;">You opted to assign an artisan later. Enter their phone number below to link them to this escrow:</div>
+            <div style="display: flex; gap: 8px;">
+                <input type="tel" id="artisanPhoneInput" placeholder="e.g. 08012345678" style="flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #93C5FD; font-size: 14px;" />
+                <button id="assignBtn" onclick="assignWorkerOnWeb()" style="background: #2563EB; color: white; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px;">Assign</button>
+            </div>
+            <div id="assignStatusMsg" style="font-size: 12px; margin-top: 8px; font-weight: 600;"></div>
+        </div>
+        <script>
+        async function assignWorkerOnWeb() {
+            const phone = document.getElementById('artisanPhoneInput').value.trim();
+            if (!phone) { alert('Please enter artisan phone number'); return; }
+            const btn = document.getElementById('assignBtn');
+            const msg = document.getElementById('assignStatusMsg');
+            btn.disabled = true;
+            msg.style.color = '#1E40AF';
+            msg.innerText = 'Assigning artisan...';
+            try {
+                const res = await fetch('/checkout/' + window.JOB_ID + '/assign-worker', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({worker_phone: phone})
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    msg.style.color = '#059669';
+                    msg.innerText = '✅ Assigned: ' + data.worker_name + '! Refreshing...';
+                    setTimeout(() => location.reload(), 1200);
+                } else {
+                    btn.disabled = false;
+                    msg.style.color = '#DC2626';
+                    msg.innerText = '❌ ' + (data.detail || 'Could not assign artisan');
+                }
+            } catch (e) {
+                btn.disabled = false;
+                msg.style.color = '#DC2626';
+                msg.innerText = 'Network error. Please try again.';
+            }
+        }
         </script>
         """
 
@@ -129,6 +207,7 @@ async def checkout_page(
                 <span class="info-label">Artisan</span>
                 <span class="info-val">{worker_name} ({job.trade})</span>
             </div>
+            {assign_box_html}
             <div class="info-row">
                 <span class="info-label">Job Reference</span>
                 <span class="info-val">{job.funding_reference}</span>
@@ -139,7 +218,7 @@ async def checkout_page(
             </div>
 
             <div class="notice">
-                ℹ️ <strong>NDPA & Safety Notice:</strong> Funds are locked securely in Paga escrow. Money is disbursed to {worker_name} only after they tap "Done Today" and you confirm. You have a 24-hour review window for each day.
+                ℹ️ <strong>NDPA & Safety Notice:</strong> Funds are locked securely in Paga escrow. Money is disbursed to the artisan only after they tap "Done Today" and you confirm. You have a 24-hour review window for each day.
             </div>
         </div>
     </div>
@@ -147,6 +226,7 @@ async def checkout_page(
 </body>
 </html>
 """
+    return HTMLResponse(content=html)
     return HTMLResponse(content=html)
 
 
@@ -433,3 +513,679 @@ async def demo_channels_page():
 </html>
 """
     return HTMLResponse(content=html)
+
+
+@router.get("/set-pin", response_class=HTMLResponse)
+async def set_pin_page(phone: str | None = None):
+    """
+    Secure Web PIN Setup Page:
+    Allows Telegram-registered users to set their 6-digit web login PIN securely in the browser
+    without typing sensitive credentials inside Telegram chat.
+    """
+    initial_phone = phone or ""
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proofwork &bull; Set Web Security PIN</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0F172A;
+            margin: 0;
+            padding: 24px;
+            color: #F8FAFC;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }}
+        .card {{
+            background: #1E293B;
+            border: 1px solid #334155;
+            border-radius: 20px;
+            max-width: 440px;
+            width: 100%;
+            padding: 32px 28px;
+            box-shadow: 0 20px 40px -10px rgba(0,0,0,0.5);
+        }}
+        .logo {{
+            font-size: 24px;
+            font-weight: 800;
+            color: #38BDF8;
+            text-align: center;
+            margin-bottom: 6px;
+        }}
+        .sub {{
+            color: #94A3B8;
+            font-size: 14px;
+            text-align: center;
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }}
+        .step-label {{
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #38BDF8;
+            margin-bottom: 6px;
+        }}
+        .form-group {{
+            margin-bottom: 18px;
+        }}
+        label {{
+            display: block;
+            font-size: 13px;
+            color: #CBD5E1;
+            margin-bottom: 6px;
+            font-weight: 500;
+        }}
+        input {{
+            width: 100%;
+            padding: 12px 14px;
+            border-radius: 10px;
+            border: 1px solid #475569;
+            background: #0F172A;
+            color: #FFFFFF;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s;
+        }}
+        input:focus {{
+            border-color: #38BDF8;
+        }}
+        input.pin-input {{
+            letter-spacing: 6px;
+            font-size: 18px;
+            text-align: center;
+            font-family: monospace;
+        }}
+        .btn {{
+            width: 100%;
+            padding: 13px;
+            background: #0284C7;
+            color: #FFFFFF;
+            border: none;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-top: 6px;
+        }}
+        .btn:hover {{
+            background: #0369A1;
+        }}
+        .btn:disabled {{
+            opacity: 0.5;
+            cursor: not-allowed;
+        }}
+        .btn-secondary {{
+            background: #334155;
+            color: #E2E8F0;
+            margin-top: 10px;
+        }}
+        .btn-secondary:hover {{
+            background: #475569;
+        }}
+        .msg {{
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-top: 14px;
+            line-height: 1.4;
+            display: none;
+        }}
+        .msg-info {{ background: #0369A120; border: 1px solid #0284C7; color: #38BDF8; display: block; }}
+        .msg-error {{ background: #991B1B20; border: 1px solid #DC2626; color: #F87171; display: block; }}
+        .msg-success {{ background: #065F4620; border: 1px solid #059669; color: #34D399; display: block; }}
+        .shield-banner {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #0284C715;
+            border: 1px solid #0284C730;
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-size: 12px;
+            color: #7DD3FC;
+            margin-bottom: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="logo">🛡️ Proofwork</div>
+        <div class="sub">Set your 6-digit security PIN for Web Access</div>
+
+        <div class="shield-banner">
+            <span>🔒</span>
+            <span>Your PIN is encrypted with constant-time SHA-256 and never shared with Telegram.</span>
+        </div>
+
+        <div id="step1">
+            <div class="step-label">Step 1: Phone Verification</div>
+            <div class="form-group">
+                <label for="phone">Your Telegram-Registered Phone Number</label>
+                <input type="tel" id="phone" value="{initial_phone}" placeholder="e.g. 08012345678 or +2348012345678" />
+            </div>
+            <button class="btn" id="sendOtpBtn" onclick="requestOtp()">Send Verification Code</button>
+            <div id="step1Msg" class="msg"></div>
+        </div>
+
+        <div id="step2" style="display: none;">
+            <div class="step-label">Step 2: Enter Verification Code & PIN</div>
+            <div class="form-group">
+                <label for="otpCode">SMS Verification Code</label>
+                <input type="text" id="otpCode" placeholder="Enter 6-digit OTP" maxlength="10" />
+                <div style="font-size: 11px; color: #64748B; margin-top: 4px;">💡 Demo Mode: enter <strong>123456</strong> as universal OTP.</div>
+            </div>
+            <div class="form-group">
+                <label for="newPin">Create New 6-Digit PIN</label>
+                <input type="password" id="newPin" class="pin-input" maxlength="6" placeholder="••••••" />
+            </div>
+            <div class="form-group">
+                <label for="confirmPin">Confirm 6-Digit PIN</label>
+                <input type="password" id="confirmPin" class="pin-input" maxlength="6" placeholder="••••••" />
+            </div>
+            <button class="btn" id="setPinBtn" onclick="submitPin()">Set Security PIN & Log In</button>
+            <button class="btn btn-secondary" onclick="backToStep1()">Back</button>
+            <div id="step2Msg" class="msg"></div>
+        </div>
+
+        <div id="stepSuccess" style="display: none;">
+            <div style="text-align: center; margin: 20px 0;">
+                <div style="font-size: 48px; margin-bottom: 12px;">🎉</div>
+                <div style="font-size: 18px; font-weight: 700; color: #34D399; margin-bottom: 8px;">Security PIN Activated!</div>
+                <div style="font-size: 13px; color: #94A3B8; line-height: 1.5; margin-bottom: 20px;">
+                    Your 6-digit PIN has been secured. You can now use your phone number and PIN to log into Proofwork on web or mobile anytime.
+                </div>
+                <div style="background: #0F172A; border-radius: 10px; padding: 14px; text-align: left; font-size: 13px; color: #CBD5E1; margin-bottom: 20px;">
+                    <div>👤 <strong>User:</strong> <span id="userName">-</span></div>
+                    <div>📱 <strong>Phone:</strong> <span id="userPhone">-</span></div>
+                    <div>💼 <strong>Account:</strong> Active & Verified ✅</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    let validatedPhone = '';
+
+    function showMsg(elemId, type, text) {{
+        const el = document.getElementById(elemId);
+        el.className = 'msg msg-' + type;
+        el.innerText = text;
+        el.style.display = 'block';
+    }}
+
+    async function requestOtp() {{
+        const phone = document.getElementById('phone').value.trim();
+        if (!phone) {{
+            showMsg('step1Msg', 'error', 'Please enter your phone number.');
+            return;
+        }}
+        const btn = document.getElementById('sendOtpBtn');
+        btn.disabled = true;
+        showMsg('step1Msg', 'info', 'Sending verification code via SMS...');
+        try {{
+            const res = await fetch('/auth/request-set-pin', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{phone: phone}})
+            }});
+            const data = await res.json();
+            if (res.ok) {{
+                validatedPhone = phone;
+                document.getElementById('step1').style.display = 'none';
+                document.getElementById('step2').style.display = 'block';
+                showMsg('step2Msg', 'info', 'Verification code sent to ' + phone + (data.otp_code ? ' (Code: ' + data.otp_code + ')' : ''));
+            }} else {{
+                btn.disabled = false;
+                showMsg('step1Msg', 'error', data.detail || 'Could not send verification code.');
+            }}
+        }} catch (e) {{
+            btn.disabled = false;
+            showMsg('step1Msg', 'error', 'Network error. Please try again.');
+        }}
+    }}
+
+    function backToStep1() {{
+        document.getElementById('step2').style.display = 'none';
+        document.getElementById('step1').style.display = 'block';
+        document.getElementById('sendOtpBtn').disabled = false;
+    }}
+
+    async function submitPin() {{
+        const otpCode = document.getElementById('otpCode').value.trim();
+        const pin = document.getElementById('newPin').value.trim();
+        const confirmPin = document.getElementById('confirmPin').value.trim();
+
+        if (!otpCode) {{
+            showMsg('step2Msg', 'error', 'Please enter the verification code.');
+            return;
+        }}
+        if (!pin || pin.length !== 6 || !/^\\d{{6}}$/.test(pin)) {{
+            showMsg('step2Msg', 'error', 'PIN must be exactly 6 numeric digits.');
+            return;
+        }}
+        if (pin !== confirmPin) {{
+            showMsg('step2Msg', 'error', 'PINs do not match. Please verify.');
+            return;
+        }}
+
+        const btn = document.getElementById('setPinBtn');
+        btn.disabled = true;
+        showMsg('step2Msg', 'info', 'Securing your PIN...');
+
+        try {{
+            const res = await fetch('/auth/set-pin', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    phone: validatedPhone,
+                    otp_code: otpCode,
+                    new_pin: pin
+                }})
+            }});
+            const data = await res.json();
+            if (res.ok) {{
+                localStorage.setItem('access_token', data.access_token);
+                localStorage.setItem('refresh_token', data.refresh_token);
+                document.getElementById('userName').innerText = data.name;
+                document.getElementById('userPhone').innerText = data.phone;
+                document.getElementById('step2').style.display = 'none';
+                document.getElementById('stepSuccess').style.display = 'block';
+            }} else {{
+                btn.disabled = false;
+                showMsg('step2Msg', 'error', data.detail || 'Could not set PIN.');
+            }}
+        }} catch (e) {{
+            btn.disabled = false;
+            showMsg('step2Msg', 'error', 'Network error. Please try again.');
+        }}
+    }}
+    </script>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
+
+
+@router.get("/supervisor/verify", response_class=HTMLResponse)
+async def supervisor_verify_page(
+    job: uuid.UUID = Query(...),
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Public token-gated verification view for site supervisors.
+    Allows supervisors to view work status, upload proof photos,
+    and confirm or dispute daily milestones with zero client PII.
+    """
+    stmt = (
+        select(Job)
+        .where(Job.id == job)
+        .options(
+            selectinload(Job.days_schedule),
+            selectinload(Job.worker),
+        )
+    )
+    job_obj = (await db.execute(stmt)).scalar_one_or_none()
+
+    if not job_obj or not token or not job_obj.supervisor_token or token.strip() != job_obj.supervisor_token:
+        error_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invalid Link - Provo Supervisor Portal</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #0F172A; color: #F8FAFC; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+        .card { background: #1E293B; border-radius: 16px; padding: 32px; max-width: 420px; text-align: center; border: 1px solid #334155; }
+        h1 { font-size: 20px; margin-bottom: 12px; color: #F87171; }
+        p { color: #94A3B8; font-size: 14px; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div style="font-size: 48px; margin-bottom: 16px;">⚠️</div>
+        <h1>Invalid or Expired Link</h1>
+        <p>This supervisor verification link is invalid, expired, or has already been revoked. Please contact the job employer for an updated link.</p>
+    </div>
+</body>
+</html>"""
+        return HTMLResponse(content=error_html, status_code=404)
+
+    worker_name = job_obj.worker.name if job_obj.worker else "Assigned Artisan"
+    supervisor_display = job_obj.supervisor_name or "Site Supervisor"
+    total_naira = f"{job_obj.total_kobo / 100:,.2f}"
+
+    days_html = []
+    for d in sorted(job_obj.days_schedule, key=lambda x: x.day_number):
+        day_naira = f"{d.amount_kobo / 100:,.2f}"
+        photo_display = ""
+
+        if d.proof_photo:
+            if d.proof_photo.startswith("data:image"):
+                photo_display = f'<div style="margin-top: 10px;"><img src="{d.proof_photo}" style="max-width: 100%; border-radius: 8px; max-height: 180px; object-fit: cover;" alt="Site Proof Photo" /></div>'
+            else:
+                photo_display = f'<div style="margin-top: 10px; font-size: 12px; color: #94A3B8;">📷 Proof: <code>{d.proof_photo}</code></div>'
+
+        if d.status == "DONE_REPORTED":
+            status_badge = '<span class="badge badge-warning">⏳ Awaiting Verification</span>'
+            action_box = f"""
+            <div class="action-card" id="action_box_{d.day_number}">
+                <p style="margin: 0 0 10px; font-size: 13px; color: #CBD5E1;">
+                    Artisan reported work done. Snap/upload a site photo (optional) and confirm or dispute:
+                </p>
+                <div style="margin-bottom: 12px;">
+                    <label class="photo-btn" for="photo_input_{d.day_number}" id="photo_label_{d.day_number}">
+                        📸 Tap to Snap or Choose Site Photo
+                    </label>
+                    <input type="file" id="photo_input_{d.day_number}" accept="image/*" capture="environment" style="display: none;" onchange="previewPhoto({d.day_number})" />
+                    <div id="preview_container_{d.day_number}" style="display: none; margin-top: 10px;">
+                        <img id="preview_img_{d.day_number}" style="max-width: 100%; border-radius: 8px; max-height: 160px; object-fit: cover;" />
+                        <button type="button" onclick="removePhoto({d.day_number})" style="background: none; border: none; color: #F87171; font-size: 12px; cursor: pointer; display: block; margin-top: 4px;">✕ Remove photo</button>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-primary" id="confirm_btn_{d.day_number}" onclick="confirmDay({d.day_number})">✅ Confirm Day Pay</button>
+                    <button class="btn btn-outline" id="dispute_btn_{d.day_number}" onclick="promptDispute({d.day_number})">⚠️ Dispute</button>
+                </div>
+                <div id="msg_{d.day_number}" style="margin-top: 8px; font-size: 13px;"></div>
+            </div>
+            """
+        elif d.status in ("CONFIRMED", "PAID"):
+            status_badge = f'<span class="badge badge-success">✅ {d.status}</span>'
+            action_box = '<div style="margin-top: 8px; font-size: 13px; color: #34D399;">Milestone confirmed and paid to artisan.</div>'
+        elif d.status == "DISPUTED":
+            status_badge = '<span class="badge badge-danger">⚠️ Disputed (Frozen)</span>'
+            action_box = '<div style="margin-top: 8px; font-size: 13px; color: #F87171;">Work disputed. 24h countdown is frozen pending resolution.</div>'
+        else:
+            status_badge = f'<span class="badge badge-neutral">⚪ {d.status}</span>'
+            action_box = '<div style="margin-top: 8px; font-size: 13px; color: #64748B;">Awaiting artisan completion.</div>'
+
+        days_html.append(f"""
+        <div class="day-card" id="day_card_{d.day_number}">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h3 style="margin: 0; font-size: 16px; color: #F8FAFC;">Day {d.day_number}</h3>
+                    <div style="font-size: 14px; font-weight: 600; color: #38BDF8; margin-top: 2px;">₦{day_naira}</div>
+                </div>
+                <div>{status_badge}</div>
+            </div>
+            {photo_display}
+            {action_box}
+        </div>
+        """)
+
+    days_rendered = "\n".join(days_html)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Provo Supervisor Portal - {job_obj.trade}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Inter', sans-serif;
+            background-color: #0F172A;
+            color: #F8FAFC;
+            padding: 24px 16px;
+            display: flex;
+            justify-content: center;
+        }}
+        .container {{
+            width: 100%;
+            max-width: 520px;
+        }}
+        .header {{
+            background: #1E293B;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid #334155;
+        }}
+        .badge {{
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: 600;
+        }}
+        .badge-warning {{ background: #FEF3C7; color: #92400E; }}
+        .badge-success {{ background: #D1FAE5; color: #065F46; }}
+        .badge-danger {{ background: #FEE2E2; color: #991B1B; }}
+        .badge-neutral {{ background: #334155; color: #94A3B8; }}
+        .badge-sup {{ background: #E0E7FF; color: #3730A3; }}
+
+        .kpi-grid {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-top: 16px;
+        }}
+        .kpi-box {{
+            background: #0F172A;
+            border-radius: 10px;
+            padding: 12px;
+            border: 1px solid #334155;
+        }}
+        .kpi-label {{
+            font-size: 12px;
+            color: #94A3B8;
+            margin-bottom: 4px;
+        }}
+        .kpi-value {{
+            font-size: 16px;
+            font-weight: 700;
+            color: #F8FAFC;
+        }}
+        .day-card {{
+            background: #1E293B;
+            border-radius: 14px;
+            padding: 16px;
+            margin-bottom: 14px;
+            border: 1px solid #334155;
+        }}
+        .action-card {{
+            background: #0F172A;
+            border-radius: 10px;
+            padding: 14px;
+            margin-top: 14px;
+            border: 1px dashed #475569;
+        }}
+        .photo-btn {{
+            display: inline-block;
+            background: #334155;
+            color: #E2E8F0;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            text-align: center;
+            width: 100%;
+        }}
+        .photo-btn:hover {{
+            background: #475569;
+        }}
+        .btn {{
+            flex: 1;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s ease;
+        }}
+        .btn-primary {{
+            background: #2563EB;
+            color: #FFFFFF;
+        }}
+        .btn-primary:hover {{
+            background: #1D4ED8;
+        }}
+        .btn-primary:disabled {{
+            opacity: 0.6;
+            cursor: not-allowed;
+        }}
+        .btn-outline {{
+            background: transparent;
+            color: #F87171;
+            border: 1px solid #EF4444;
+        }}
+        .btn-outline:hover {{
+            background: rgba(239, 68, 68, 0.1);
+        }}
+        .notice {{
+            font-size: 12px;
+            color: #64748B;
+            text-align: center;
+            margin-top: 24px;
+            line-height: 1.5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <span class="badge badge-sup">🕵️ {supervisor_display}</span>
+                <span class="badge" style="background: #38BDF8; color: #0C4A6E;">SITE PORTAL</span>
+            </div>
+            <h1 style="font-size: 20px; font-weight: 700; margin-bottom: 4px;">{job_obj.trade} Verification</h1>
+            <p style="font-size: 14px; color: #94A3B8;">{job_obj.description}</p>
+
+            <div class="kpi-grid">
+                <div class="kpi-box">
+                    <div class="kpi-label">Assigned Artisan</div>
+                    <div class="kpi-value">👷 {worker_name}</div>
+                </div>
+                <div class="kpi-box">
+                    <div class="kpi-label">Total Escrow</div>
+                    <div class="kpi-value">₦{total_naira}</div>
+                </div>
+            </div>
+        </div>
+
+        <h2 style="font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #CBD5E1;">Milestone Schedule</h2>
+        {days_rendered}
+
+        <div class="notice">
+            🔒 <strong>Provo Supervisor Portal:</strong> Token-authenticated access.<br>
+            Confirmations trigger instant automated escrow release to the artisan.
+        </div>
+    </div>
+
+    <script>
+    const jobId = "{job_obj.id}";
+    const token = "{token}";
+    const photoData = {{}};
+
+    function previewPhoto(dayNumber) {{
+        const input = document.getElementById('photo_input_' + dayNumber);
+        if (!input.files || !input.files[0]) return;
+        const file = input.files[0];
+        const reader = new FileReader();
+        reader.onload = function(e) {{
+            photoData[dayNumber] = e.target.result;
+            document.getElementById('preview_img_' + dayNumber).src = e.target.result;
+            document.getElementById('preview_container_' + dayNumber).style.display = 'block';
+            document.getElementById('photo_label_' + dayNumber).innerText = '📷 Photo Selected (Tap to Change)';
+        }};
+        reader.readAsDataURL(file);
+    }}
+
+    function removePhoto(dayNumber) {{
+        photoData[dayNumber] = null;
+        document.getElementById('photo_input_' + dayNumber).value = '';
+        document.getElementById('preview_container_' + dayNumber).style.display = 'none';
+        document.getElementById('photo_label_' + dayNumber).innerText = '📸 Tap to Snap or Choose Site Photo';
+    }}
+
+    async function confirmDay(dayNumber) {{
+        const btn = document.getElementById('confirm_btn_' + dayNumber);
+        const disputeBtn = document.getElementById('dispute_btn_' + dayNumber);
+        const msg = document.getElementById('msg_' + dayNumber);
+        btn.disabled = true;
+        disputeBtn.disabled = true;
+        msg.style.color = '#38BDF8';
+        msg.innerText = 'Confirming milestone and releasing payout...';
+
+        try {{
+            const payload = {{
+                proof_photo: photoData[dayNumber] || null
+            }};
+            const res = await fetch(`/jobs/${{jobId}}/days/${{dayNumber}}/supervisor-confirm?token=${{encodeURIComponent(token)}}`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(payload)
+            }});
+            const data = await res.json();
+            if (res.ok) {{
+                msg.style.color = '#34D399';
+                msg.innerText = '✅ Day ' + dayNumber + ' confirmed! Payout released.';
+                setTimeout(() => {{ window.location.reload(); }}, 1200);
+            }} else {{
+                btn.disabled = false;
+                disputeBtn.disabled = false;
+                msg.style.color = '#F87171';
+                msg.innerText = '❌ ' + (data.detail || 'Failed to confirm day');
+            }}
+        }} catch (e) {{
+            btn.disabled = false;
+            disputeBtn.disabled = false;
+            msg.style.color = '#F87171';
+            msg.innerText = '❌ Network error. Please try again.';
+        }}
+    }}
+
+    async function promptDispute(dayNumber) {{
+        const reason = prompt('Enter dispute reason (this will freeze the 24-hour auto-release countdown):', 'Work incomplete or not meeting site specifications');
+        if (!reason) return;
+
+        const btn = document.getElementById('confirm_btn_' + dayNumber);
+        const disputeBtn = document.getElementById('dispute_btn_' + dayNumber);
+        const msg = document.getElementById('msg_' + dayNumber);
+        btn.disabled = true;
+        disputeBtn.disabled = true;
+        msg.style.color = '#F87171';
+        msg.innerText = 'Freezing milestone and registering dispute...';
+
+        try {{
+            const res = await fetch(`/jobs/${{jobId}}/days/${{dayNumber}}/supervisor-dispute?token=${{encodeURIComponent(token)}}`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ reason: reason }})
+            }});
+            const data = await res.json();
+            if (res.ok) {{
+                msg.innerText = '⚠️ Day ' + dayNumber + ' disputed. Countdown frozen.';
+                setTimeout(() => {{ window.location.reload(); }}, 1200);
+            }} else {{
+                btn.disabled = false;
+                disputeBtn.disabled = false;
+                msg.innerText = '❌ ' + (data.detail || 'Failed to dispute day');
+            }}
+        }} catch (e) {{
+            btn.disabled = false;
+            disputeBtn.disabled = false;
+            msg.innerText = '❌ Network error. Please try again.';
+        }}
+    }}
+    </script>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
+

@@ -3,10 +3,10 @@ import uuid
 from typing import Any
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -17,12 +17,17 @@ from app.db.models import ClientProfile, Job, JobDay, User, WorkerProfile
 from app.domain.scoring import DayScoreInput, calculate_worker_score
 from app.integrations.telegram.keyboards import (
     artisan_picker_keyboard,
+    assign_artisan_keyboard,
+    assign_artisan_picker_keyboard,
     client_main_menu,
     contact_keyboard,
+    day_review_inline_keyboard,
+    employer_job_actions_keyboard,
     fund_job_inline_keyboard,
     job_days_picker_keyboard,
     job_trade_picker_keyboard,
     role_selection_keyboard,
+    set_pin_keyboard,
     trade_selection_keyboard,
     worker_main_menu,
 )
@@ -44,6 +49,19 @@ class CreateJobStates(StatesGroup):
     manual_artisan_phone = State()
 
 
+class AssignWorkerStates(StatesGroup):
+    waiting_for_phone = State()
+
+
+class AssignSupervisorStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_phone = State()
+
+
+class ReviewPhotoStates(StatesGroup):
+    waiting_for_photo = State()
+
+
 def get_funding_service():
     from app.services.funding_service import FundingService
     return FundingService()
@@ -51,8 +69,65 @@ def get_funding_service():
 
 @router.message(CommandStart())
 async def handle_start(message: Message) -> None:
-    """Welcomes the user and initializes onboarding or main dashboard."""
+    """Welcomes the user and initializes onboarding, supervisor portal, or main dashboard."""
     tg_id = message.from_user.id if message.from_user else 0
+
+    # Check for supervisor deep-link token in /start arg (e.g. /start sup_<token> or /start supervisor_<token>)
+    parts = message.text.split(maxsplit=1) if message.text else []
+    if len(parts) > 1:
+        raw_arg = parts[1].strip()
+        candidates = [raw_arg]
+        if raw_arg.startswith("supervisor_"):
+            candidates.append(raw_arg[11:])
+            candidates.append(f"sup_{raw_arg[11:]}")
+        elif raw_arg.startswith("sup_"):
+            candidates.append(raw_arg[4:])
+
+        async with async_session_factory() as session:
+            stmt = (
+                select(Job)
+                .where(Job.supervisor_token.in_(candidates))
+                .options(selectinload(Job.days_schedule), selectinload(Job.worker))
+            )
+            sup_job = (await session.execute(stmt)).scalar_one_or_none()
+            if sup_job:
+                worker_name = sup_job.worker.name if sup_job.worker else "Assigned Artisan"
+                token_val = sup_job.supervisor_token
+                web_link = f"https://proofwork.app/supervisor/verify?job={sup_job.id}&token={token_val}"
+
+                # Render schedule with zero employer PII
+                days_summary = []
+                pending_review_day = None
+                for d in sorted(sup_job.days_schedule, key=lambda x: x.day_number):
+                    status_icon = (
+                        "✅" if d.status in ("CONFIRMED", "PAID")
+                        else ("⚠️" if d.status == "DISPUTED"
+                              else ("⏳" if d.status == "DONE_REPORTED" else "⚪"))
+                    )
+                    days_summary.append(f"Day {d.day_number}: {status_icon} `{d.status}` ({kobo_to_naira_str(d.amount_kobo)})")
+                    if d.status == "DONE_REPORTED" and pending_review_day is None:
+                        pending_review_day = d
+
+                schedule_text = "\n".join(days_summary)
+                portal_text = (
+                    f"🕵️ *Supervisor Portal: {sup_job.trade}*\n\n"
+                    f"• *Job:* {sup_job.description}\n"
+                    f"• *Artisan:* {worker_name}\n"
+                    f"• *Duration:* {sup_job.days} Day(s)\n"
+                    f"• *Total Escrow:* {kobo_to_naira_str(sup_job.total_kobo)}\n\n"
+                    f"*Daily Schedule:*\n{schedule_text}\n\n"
+                    f"You have been assigned to verify and confirm daily work milestones on site."
+                )
+
+                if pending_review_day:
+                    kb = day_review_inline_keyboard(str(sup_job.id), pending_review_day.day_number, supervisor_token=token_val)
+                else:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="🌐 Open Supervisor Web View", url=web_link)
+                    ]])
+
+                await message.answer(portal_text, parse_mode="Markdown", reply_markup=kb)
+                return
 
     async with async_session_factory() as session:
         stmt = (
@@ -65,12 +140,12 @@ async def handle_start(message: Message) -> None:
         if user:
             if user.is_worker:
                 await message.answer(
-                    f"Welcome back, {user.name}! 🔨\nHere is your artisan dashboard.",
+                    f"Welcome back, {user.name}! 🔨\nHere is your Artisan dashboard.",
                     reply_markup=worker_main_menu(),
                 )
             else:
                 await message.answer(
-                    f"Welcome back, {user.name}! 💼\nHere is your client dashboard.",
+                    f"Welcome back, {user.name}! 💼\nHere is your employer dashboard.",
                     reply_markup=client_main_menu(),
                 )
             return
@@ -78,8 +153,8 @@ async def handle_start(message: Message) -> None:
     # User not yet registered on Telegram
     await message.answer(
         "Welcome to *Provo*! 🛡️\n\n"
-        "Provo holds client payments in escrow, releases funds daily as work is confirmed, "
-        "and creates verified records that lenders can trust.\n\n"
+        "Provo simplifies work payments, ensures workers are paid for completed tasks, "
+        "builds verified work records that lenders can trust.\n\n"
         "To get started, please tap the button below to share and verify your phone number:",
         parse_mode="Markdown",
         reply_markup=contact_keyboard(),
@@ -131,14 +206,14 @@ async def handle_contact_share(message: Message) -> None:
         else:
             await message.answer(
                 f"Account linked successfully, {user.name}! 💼\n"
-                f"Welcome to your Provo Client dashboard.",
+                f"Welcome to your Provo Employer dashboard.",
                 reply_markup=client_main_menu(),
             )
         return
 
     await message.answer(
         f"Phone number verified: *{clean_phone}* ✅\n\n"
-        "Are you using Provo as an Artisan (to do work and earn) or as a Client (to hire artisans)?",
+        "Are you using Provo as an Artisan (to do work and earn) or as an Employer (to hire artisans)?",
         parse_mode="Markdown",
         reply_markup=role_selection_keyboard(),
     )
@@ -146,7 +221,7 @@ async def handle_contact_share(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("role:"))
 async def handle_role_selection(query: CallbackQuery) -> None:
-    """Routes user into either the Worker track or Client track."""
+    """Routes user into either the Worker track or Employer track."""
     if not query.message or not query.from_user:
         return
 
@@ -182,11 +257,22 @@ async def handle_role_selection(query: CallbackQuery) -> None:
             await session.commit()
 
             await query.message.edit_text(
-                "Welcome as a Provo Client! 💼\n"
+                "Welcome as a Provo Employer! 💼\n"
                 "You can now create escrow-backed jobs for artisans.",
                 reply_markup=None,
             )
             await query.message.answer("Dashboard ready:", reply_markup=client_main_menu())
+
+            # Prompt to set web PIN if not yet set
+            if not user.pin_hash:
+                await query.message.answer(
+                    "🔐 *Set Your Web PIN (Optional)*\n\n"
+                    "To also access Proofwork on the web, you'll need a 6-digit PIN. "
+                    "You won't type it here — tap the button below to set it on a secure page:\n\n"
+                    "_(You can skip this and do it later via /setpin)_",
+                    parse_mode="Markdown",
+                    reply_markup=set_pin_keyboard(user.phone),
+                )
 
     await query.answer()
 
@@ -213,11 +299,52 @@ async def handle_trade_selection(query: CallbackQuery) -> None:
 
     await query.message.edit_text(
         f"Artisan Track selected: *{selected_trade.capitalize()}* 🔨\n\n"
-        "Your profile is active! When clients hire you through Provo, you will see your jobs here.",
+        "Your profile is active! When employers hire you through Provo, you will see your jobs here.",
         parse_mode="Markdown",
     )
     await query.message.answer("Artisan Dashboard:", reply_markup=worker_main_menu())
+
+    # Prompt to set web PIN if not yet set
+    if user and not user.pin_hash:
+        await query.message.answer(
+            "🔐 *Set Your Web PIN (Optional)*\n\n"
+            "To also access Proofwork on the web, you'll need a 6-digit PIN. "
+            "You won't type it here — tap the button below to set it on a secure page:\n\n"
+            "_(You can skip this and do it later via /setpin)_",
+            parse_mode="Markdown",
+            reply_markup=set_pin_keyboard(user.phone),
+        )
+
     await query.answer()
+
+
+@router.callback_query(F.data == "skip_pin_setup")
+async def handle_skip_pin_setup(query: CallbackQuery) -> None:
+    """Dismisses the PIN setup prompt."""
+    if query.message:
+        await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer("You can set your web PIN anytime via /setpin.")
+
+
+@router.message(Command("setpin"))
+async def handle_setpin_command(message: Message) -> None:
+    """Allows users to set/update their web PIN from the bot."""
+    tg_id = message.from_user.id if message.from_user else 0
+    async with async_session_factory() as session:
+        stmt = select(User).where(User.telegram_user_id == tg_id)
+        user = (await session.execute(stmt)).scalar_one_or_none()
+        if not user:
+            await message.answer("Please send /start to register first.")
+            return
+        status_text = "not yet set" if not user.pin_hash else "already set (tap to update)"
+        await message.answer(
+            f"🔐 *Web PIN Setup*\n\n"
+            f"PIN status: *{status_text}*\n\n"
+            "Tap below to set or update your 6-digit PIN on the secure Proofwork web page:\n\n"
+            "_(Your PIN is never entered directly in Telegram for maximum security)_",
+            parse_mode="Markdown",
+            reply_markup=set_pin_keyboard(user.phone),
+        )
 
 
 @router.message(F.text == "💼 My Active Jobs")
@@ -245,7 +372,7 @@ async def handle_my_active_jobs(message: Message) -> None:
         if not jobs:
             await message.answer(
                 "You have no active escrow jobs right now.\n"
-                "Tell your client to hire you on Provo or enter your phone number when creating a job!"
+                "Tell your employer to hire you on Provo or enter your phone number when creating a job!"
             )
             return
 
@@ -287,17 +414,273 @@ async def handle_client_posted_jobs(message: Message) -> None:
             )
             return
 
-        text = "📋 *Your Posted Jobs:*\n\n"
+        await message.answer("📋 *Your Posted Jobs:*", parse_mode="Markdown")
         for job in jobs:
             worker_name = job.worker.name if job.worker else "Not assigned"
-            text += (
+            supervisor_name = job.supervisor_name if job.supervisor_name else "None assigned"
+            job_text = (
                 f"• *{job.trade}*: {job.description}\n"
                 f"  Total: {kobo_to_naira_str(job.total_kobo)} | Status: `{job.status}`\n"
                 f"  Artisan: {worker_name}\n"
-                f"  Account: `{job.paga_account_number or 'pending'}`\n\n"
+                f"  Supervisor: {supervisor_name}\n"
+                f"  Account: `{job.paga_account_number or 'pending'}`"
+            )
+            can_assign_worker = (
+                job.worker_id is None
+                and job.status in (JobStatus.DRAFT.value, JobStatus.AWAITING_FUNDING.value, JobStatus.FUNDED.value)
+            )
+            can_assign_supervisor = (
+                job.supervisor_name is None
+                and job.status in (JobStatus.DRAFT.value, JobStatus.AWAITING_FUNDING.value, JobStatus.FUNDED.value, JobStatus.IN_PROGRESS.value)
+            )
+            actions_kb = employer_job_actions_keyboard(
+                str(job.id),
+                can_assign_worker=can_assign_worker,
+                can_assign_supervisor=can_assign_supervisor,
+                supervisor_token=job.supervisor_token,
+            )
+            await message.answer(
+                job_text,
+                parse_mode="Markdown",
+                reply_markup=actions_kb,
             )
 
-        await message.answer(text, parse_mode="Markdown")
+
+@router.callback_query(F.data.startswith("assign_artisan:"))
+async def handle_assign_artisan_start(query: CallbackQuery, state: FSMContext) -> None:
+    """Starts the assign artisan flow for a posted job: offers directory artisans or manual phone entry."""
+    if not query.message or not query.from_user:
+        return
+    job_id_str = query.data.split(":")[1]
+    job_id = uuid.UUID(job_id_str)
+    tg_id = query.from_user.id
+
+    async with async_session_factory() as session:
+        job_stmt = select(Job).where(Job.id == job_id)
+        job = (await session.execute(job_stmt)).scalar_one_or_none()
+        if not job:
+            await query.answer("Job not found.", show_alert=True)
+            return
+
+        trade = job.trade
+        # Query matching available artisans in directory
+        stmt = (
+            select(WorkerProfile)
+            .where(WorkerProfile.trade == trade, WorkerProfile.is_available.is_(True))
+            .options(selectinload(WorkerProfile.user))
+            .limit(6)
+        )
+        profiles = list((await session.execute(stmt)).scalars().all())
+
+        artisan_list = []
+        for prof in profiles:
+            u = prof.user
+            if not u:
+                continue
+            count_stmt = (
+                select(func.count(JobDay.id))
+                .join(Job, JobDay.job_id == Job.id)
+                .where(Job.worker_id == u.id, JobDay.status == DayStatus.PAID.value)
+            )
+            v_days = (await session.execute(count_stmt)).scalar() or 0
+            badge = "⭐ Gold" if v_days >= 30 else ("⭐ Silver" if v_days >= 10 else ("⭐ Bronze" if v_days >= 1 else "Unverified"))
+            artisan_list.append({
+                "user_id": str(u.id),
+                "name": u.name,
+                "area": prof.area,
+                "badge": badge,
+            })
+
+    if artisan_list:
+        await query.message.answer(
+            f"👷 *Assign an Artisan for {trade}*\n\n"
+            f"Found {len(artisan_list)} registered artisan(s) in this trade.\n"
+            "Tap to assign directly, or enter their phone number:",
+            parse_mode="Markdown",
+            reply_markup=assign_artisan_picker_keyboard(artisan_list, job_id_str),
+        )
+    else:
+        await state.set_state(AssignWorkerStates.waiting_for_phone)
+        await state.update_data(assign_job_id=job_id_str)
+        await query.message.answer(
+            f"👷 *Assign an Artisan for {trade}*\n\n"
+            "Please enter the artisan's phone number (e.g. `08012345678`):",
+            parse_mode="Markdown",
+        )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("assign_artisan_pick:"))
+async def handle_assign_artisan_pick(query: CallbackQuery) -> None:
+    """Assigns a directory artisan directly to an unassigned job."""
+    if not query.message or not query.from_user:
+        return
+    parts = query.data.split(":")
+    job_id = uuid.UUID(parts[1])
+    worker_id = uuid.UUID(parts[2])
+    tg_id = query.from_user.id
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == tg_id)
+        actor = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not actor:
+            await query.answer("You are not registered.", show_alert=True)
+            return
+
+        try:
+            job = await job_service.assign_worker_to_job(
+                db=session,
+                job_id=job_id,
+                actor_id=actor.id,
+                worker_id=worker_id,
+            )
+            await session.commit()
+            worker_name = job.worker.name if job.worker else "Assigned Artisan"
+            await query.message.edit_text(
+                f"✅ *Artisan Assigned Successfully!*\n\n"
+                f"• *Job:* {job.description}\n"
+                f"• *Artisan:* {worker_name}\n\n"
+                f"They will receive daily release notifications once work begins.",
+                parse_mode="Markdown",
+            )
+        except ValueError as e:
+            await query.answer(f"Failed: {e}", show_alert=True)
+
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("assign_artisan_manual:"))
+async def handle_assign_artisan_manual_button(query: CallbackQuery, state: FSMContext) -> None:
+    """Switches to manual phone input mode from directory picker."""
+    if not query.message:
+        return
+    job_id_str = query.data.split(":")[1]
+    await state.set_state(AssignWorkerStates.waiting_for_phone)
+    await state.update_data(assign_job_id=job_id_str)
+    await query.message.answer(
+        "📱 *Enter Artisan Phone Number*\n\n"
+        "Please type the artisan's phone number (e.g. `08012345678` or `+2348012345678`):",
+        parse_mode="Markdown",
+    )
+    await query.answer()
+
+
+@router.message(AssignWorkerStates.waiting_for_phone)
+async def handle_assign_artisan_phone(message: Message, state: FSMContext) -> None:
+    """Handles phone number entry for assigning an artisan to an existing job."""
+    raw_phone = message.text.strip() if message.text else ""
+    tg_id = message.from_user.id if message.from_user else 0
+    data = await state.get_data()
+    job_id_str = data.get("assign_job_id", "")
+    await state.clear()
+
+    if not job_id_str:
+        await message.answer("Something went wrong. Please try again from My Posted Jobs.")
+        return
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == tg_id)
+        actor = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not actor:
+            await message.answer("Please send /start to register.")
+            return
+        try:
+            job = await job_service.assign_worker_to_job(
+                db=session,
+                job_id=uuid.UUID(job_id_str),
+                actor_id=actor.id,
+                worker_phone=raw_phone,
+            )
+            await session.commit()
+            worker_name = job.worker.name if job.worker else raw_phone
+            await message.answer(
+                f"✅ *Artisan assigned successfully!*\n\n"
+                f"• *Artisan:* {worker_name}\n"
+                f"• *Phone:* `{raw_phone}`\n\n"
+                f"They will be notified when the job is funded.",
+                parse_mode="Markdown",
+            )
+        except ValueError as e:
+            await message.answer(f"❌ Error: {e}")
+
+
+@router.callback_query(F.data.startswith("assign_supervisor:"))
+async def handle_assign_supervisor_start(query: CallbackQuery, state: FSMContext) -> None:
+    """Initiates assigning a site supervisor to a job."""
+    if not query.message or not query.from_user:
+        return
+    job_id_str = query.data.split(":")[1]
+    await state.set_state(AssignSupervisorStates.waiting_for_name)
+    await state.update_data(supervisor_job_id=job_id_str)
+    await query.message.answer(
+        "🕵️ *Assign a Site Supervisor*\n\n"
+        "Enter the supervisor's *Full Name* (e.g. `Engr. Babatunde`):",
+        parse_mode="Markdown",
+    )
+    await query.answer()
+
+
+@router.message(AssignSupervisorStates.waiting_for_name)
+async def handle_assign_supervisor_name(message: Message, state: FSMContext) -> None:
+    """Stores supervisor name and prompts for phone number."""
+    name = message.text.strip() if message.text else ""
+    if not name or len(name) < 2:
+        await message.answer("Please enter a valid supervisor name (at least 2 characters):")
+        return
+    await state.update_data(supervisor_name=name)
+    await state.set_state(AssignSupervisorStates.waiting_for_phone)
+    await message.answer(
+        f"Great! Now enter *{name}*'s Phone Number (e.g. `08012345678` or `+2348012345678`):",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(AssignSupervisorStates.waiting_for_phone)
+async def handle_assign_supervisor_phone(message: Message, state: FSMContext) -> None:
+    """Validates phone number and assigns supervisor via job_service."""
+    raw_phone = message.text.strip() if message.text else ""
+    tg_id = message.from_user.id if message.from_user else 0
+    data = await state.get_data()
+    job_id_str = data.get("supervisor_job_id")
+    sup_name = data.get("supervisor_name")
+    await state.clear()
+
+    if not job_id_str or not sup_name:
+        await message.answer("Something went wrong. Please try again from My Posted Jobs.")
+        return
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == tg_id)
+        actor = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not actor:
+            await message.answer("Please send /start to register.")
+            return
+
+        try:
+            job = await job_service.assign_supervisor(
+                db=session,
+                job_id=uuid.UUID(job_id_str),
+                actor_id=actor.id,
+                supervisor_name=sup_name,
+                supervisor_phone=raw_phone,
+            )
+            await session.commit()
+
+            clean_phone = job.supervisor_phone
+            sup_link = f"https://proofwork.app/supervisor/verify?job={job.id}&token={job.supervisor_token}"
+            bot_link = f"https://t.me/provo_bot?start={job.supervisor_token}"
+
+            await message.answer(
+                f"✅ *Supervisor Assigned Successfully!*\n\n"
+                f"• *Name:* {job.supervisor_name}\n"
+                f"• *Phone:* `{clean_phone}`\n\n"
+                f"🔗 *Supervisor Verification Link:*\n{sup_link}\n\n"
+                f"🤖 *Telegram Bot Direct Link:*\n{bot_link}\n\n"
+                f"_Share either link with {job.supervisor_name}. They can inspect and confirm work daily without needing a password!_",
+                parse_mode="Markdown",
+            )
+        except ValueError as e:
+            await message.answer(f"❌ Failed to assign supervisor: {e}")
 
 
 @router.message(F.text == "💳 Fund a Job")
@@ -342,12 +725,14 @@ async def handle_fund_a_job(message: Message) -> None:
 
             amount_naira = kobo_to_naira_str(job.total_kobo)
             worker_name = job.worker.name if job.worker else "Assigned Artisan"
+            supervisor_name = job.supervisor_name if job.supervisor_name else "None assigned"
             account_num = job.paga_account_number or "Processing..."
 
             msg_text = (
                 f"💳 *Escrow Payment Details for {job.trade}*\n\n"
                 f"• *Job:* {job.description}\n"
                 f"• *Artisan:* {worker_name}\n"
+                f"• *Supervisor:* {supervisor_name}\n"
                 f"• *Total Amount:* *{amount_naira}*\n"
                 f"• *Status:* `{job.status}`\n\n"
                 f"🏦 *Bank Transfer Instructions:*\n"
@@ -358,17 +743,23 @@ async def handle_fund_a_job(message: Message) -> None:
             await message.answer(
                 msg_text,
                 parse_mode="Markdown",
-                reply_markup=fund_job_inline_keyboard(str(job.id), job.paga_account_number),
+                reply_markup=fund_job_inline_keyboard(
+                    str(job.id),
+                    job.paga_account_number,
+                    show_assign_worker=(job.worker_id is None),
+                    show_assign_supervisor=(job.supervisor_name is None),
+                    supervisor_token=job.supervisor_token,
+                ),
             )
 
 
 @router.message(F.text == "ℹ️ Help")
 async def handle_help_menu(message: Message) -> None:
-    """Provides general help and guide for both clients and artisans."""
+    """Provides general help and guide for both employers and artisans."""
     help_text = (
         "🛡️ *Welcome to Provo Help & Support*\n\n"
-        "Provo is a daily milestone escrow platform designed for informal artisans and clients.\n\n"
-        "• *For Clients:*\n"
+        "Provo is a daily milestone escrow platform designed for informal artisans and employers.\n\n"
+        "• *For Employers:*\n"
         "  1. Tap *📋 My Posted Jobs* to see your jobs and status.\n"
         "  2. Tap *💳 Fund a Job* to get bank transfer details to lock funds in escrow.\n"
         "  3. Review and confirm daily work notifications to release artisan pay.\n\n"
@@ -418,9 +809,53 @@ async def handle_done_today_menu(message: Message) -> None:
                         worker_user_id=user.id,
                     )
                     await session.commit()
+
+                    # Notify employer if on Telegram
+                    stmt_client = select(User).where(User.id == job.client_id)
+                    client_user = (await session.execute(stmt_client)).scalar_one_or_none()
+                    if client_user and client_user.telegram_user_id:
+                        try:
+                            from app.integrations.telegram.bot import bot
+                            await bot.send_message(
+                                chat_id=client_user.telegram_user_id,
+                                text=(
+                                    f"🔔 *Milestone Done: Day {pending_day.day_number}*\n\n"
+                                    f"• *Job:* {job.description}\n"
+                                    f"• *Artisan:* {user.name}\n"
+                                    f"• *Amount:* {kobo_to_naira_str(pending_day.amount_kobo)}\n\n"
+                                    f"Please review and confirm to release funds, or dispute if incomplete."
+                                ),
+                                parse_mode="Markdown",
+                                reply_markup=day_review_inline_keyboard(str(job.id), pending_day.day_number, supervisor_token=job.supervisor_token),
+                            )
+                        except Exception as e:
+                            logger.warning("Could not send Telegram review alert to employer: %s", e)
+
+                    # Also notify supervisor if registered on Telegram
+                    if job.supervisor_phone:
+                        stmt_sup = select(User).where(User.phone == job.supervisor_phone)
+                        sup_user = (await session.execute(stmt_sup)).scalar_one_or_none()
+                        if sup_user and sup_user.telegram_user_id:
+                            try:
+                                from app.integrations.telegram.bot import bot
+                                await bot.send_message(
+                                    chat_id=sup_user.telegram_user_id,
+                                    text=(
+                                        f"🕵️ *Supervisor Alert: Day {pending_day.day_number} Completed*\n\n"
+                                        f"• *Job:* {job.description}\n"
+                                        f"• *Artisan:* {user.name}\n"
+                                        f"• *Amount:* {kobo_to_naira_str(pending_day.amount_kobo)}\n\n"
+                                        f"Please verify site progress and confirm or dispute."
+                                    ),
+                                    parse_mode="Markdown",
+                                    reply_markup=day_review_inline_keyboard(str(job.id), pending_day.day_number, supervisor_token=job.supervisor_token),
+                                )
+                            except Exception as e:
+                                logger.warning("Could not send Telegram review alert to supervisor: %s", e)
+
                     await message.answer(
                         f"✅ *Day {pending_day.day_number} reported done!* ({kobo_to_naira_str(pending_day.amount_kobo)})\n\n"
-                        "Your client and supervisor have been notified to review and confirm. "
+                        "Your employer and supervisor have been notified to review and confirm. "
                         "The 24-hour countdown has started.",
                         parse_mode="Markdown",
                     )
@@ -471,8 +906,8 @@ async def handle_my_record(message: Message) -> None:
             f"• *Rating Tier:* `{score_res.band}`\n"
             f"• *Confirmed Days:* {score_res.confirmed_days}\n"
             f"• *Auto-Released Days:* {score_res.auto_released_days}\n"
-            f"• *Unique Clients:* {score_res.unique_payers}\n"
-            f"• *Repeat Clients:* {score_res.repeat_payers}\n"
+            f"• *Unique Employers:* {score_res.unique_payers}\n"
+            f"• *Repeat Employers:* {score_res.repeat_payers}\n"
             f"• *Active Earning Months:* {score_res.active_months}\n\n"
             "_Shareable with any lender for tool and equipment financing!_"
         )
@@ -552,6 +987,71 @@ async def handle_inline_dispute(query: CallbackQuery) -> None:
             await query.answer(f"Failed: {e}", show_alert=True)
 
     await query.answer()
+
+
+@router.callback_query(F.data.startswith("review_photo:"))
+async def handle_inline_review_photo_start(query: CallbackQuery, state: FSMContext) -> None:
+    """Prompts reviewer to take or upload a site photo to confirm milestone."""
+    if not query.message or not query.from_user:
+        return
+    parts = query.data.split(":")
+    job_id = parts[1]
+    day_number = int(parts[2])
+    await state.set_state(ReviewPhotoStates.waiting_for_photo)
+    await state.update_data(photo_job_id=job_id, photo_day_number=day_number)
+    await query.message.answer(
+        f"📷 *Upload Proof Photo for Day {day_number}*\n\n"
+        "Please take or upload a photo showing the completed work on site:",
+        parse_mode="Markdown",
+    )
+    await query.answer()
+
+
+@router.message(ReviewPhotoStates.waiting_for_photo, F.photo)
+async def handle_inline_review_photo_received(message: Message, state: FSMContext) -> None:
+    """Receives site photo, confirms day, and attaches proof photo."""
+    tg_id = message.from_user.id if message.from_user else 0
+    data = await state.get_data()
+    job_id_str = data.get("photo_job_id")
+    day_number = data.get("photo_day_number")
+    await state.clear()
+
+    if not job_id_str or day_number is None:
+        await message.answer("Session expired. Please try confirming again from the review card.")
+        return
+
+    photo = message.photo[-1]
+    proof_photo_ref = f"tg_file:{photo.file_id}"
+
+    async with async_session_factory() as session:
+        user_stmt = select(User).where(User.telegram_user_id == tg_id)
+        actor = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        job_stmt = select(Job).where(Job.id == uuid.UUID(job_id_str))
+        job = (await session.execute(job_stmt)).scalar_one_or_none()
+
+        if not job:
+            await message.answer("Job not found.")
+            return
+
+        actor_id = actor.id if actor else job.client_id
+        try:
+            day, _payout = await release_service.confirm_day(
+                db=session,
+                job_id=uuid.UUID(job_id_str),
+                day_number=day_number,
+                actor_user_id=actor_id,
+                proof_photo=proof_photo_ref,
+            )
+            await session.commit()
+            await message.answer(
+                f"✅ *Day {day_number} Confirmed with Proof Photo!* 📷\n\n"
+                f"Amount of {kobo_to_naira_str(day.amount_kobo)} released to artisan.\n"
+                f"Proof photo saved to the permanent milestone credit record.",
+                parse_mode="Markdown",
+            )
+        except ValueError as e:
+            await message.answer(f"❌ Failed to confirm day: {e}")
 
 
 @router.callback_query(F.data.startswith("sim_fund:"))
@@ -634,7 +1134,7 @@ async def start_job_creation(message: Message, state: FSMContext) -> None:
         user_stmt = select(User).where(User.telegram_user_id == tg_id)
         user = (await session.execute(user_stmt)).scalar_one_or_none()
         if not user or not user.is_client:
-            await message.answer("Please register as a Client to create jobs.")
+            await message.answer("Please register as an Employer to create jobs.")
             return
 
     await state.clear()
@@ -833,6 +1333,7 @@ async def _finalize_job_creation(
         job = (await session.execute(stmt)).scalar_one()
 
         worker_display = f"{job.worker.name} ({job.worker.phone})" if job.worker else "Not yet assigned (Assign later)"
+        supervisor_display = job.supervisor_name or "None assigned (Assign later)"
         amount_naira = kobo_to_naira_str(job.total_kobo)
         account_num = job.paga_account_number or "Pending..."
 
@@ -843,6 +1344,7 @@ async def _finalize_job_creation(
             f"• *Duration:* {job.days} Day(s)\n"
             f"• *Total Escrow:* *{amount_naira}*\n"
             f"• *Artisan:* {worker_display}\n"
+            f"• *Supervisor:* {supervisor_display}\n"
             f"• *Status:* `{job.status}`\n\n"
             f"🏦 *Bank Transfer Escrow Details:*\n"
             f"• *Bank:* `Paga`\n"
@@ -879,7 +1381,13 @@ async def process_artisan_choice(query: CallbackQuery, state: FSMContext) -> Non
         await query.message.edit_text(
             summary_text,
             parse_mode="Markdown",
-            reply_markup=fund_job_inline_keyboard(str(job.id), job.paga_account_number),
+            reply_markup=fund_job_inline_keyboard(
+                str(job.id),
+                job.paga_account_number,
+                show_assign_worker=(job.worker_id is None),
+                show_assign_supervisor=(job.supervisor_name is None),
+                supervisor_token=job.supervisor_token,
+            ),
         )
     await query.answer("Job created!")
 
@@ -927,5 +1435,11 @@ async def process_manual_artisan_phone(message: Message, state: FSMContext) -> N
     await message.answer(
         summary_text,
         parse_mode="Markdown",
-        reply_markup=fund_job_inline_keyboard(str(job.id), job.paga_account_number),
+        reply_markup=fund_job_inline_keyboard(
+            str(job.id),
+            job.paga_account_number,
+            show_assign_worker=(job.worker_id is None),
+            show_assign_supervisor=(job.supervisor_name is None),
+            supervisor_token=job.supervisor_token,
+        ),
     )

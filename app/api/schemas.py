@@ -11,15 +11,15 @@ class SignupRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str = Field(..., min_length=2, max_length=150)
     phone: str = Field(..., description="Phone number in national or E.164 format")
-    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="6-digit security PIN")
-    role: str = Field("worker", description="'worker' or 'client'")
+    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="6-digit security PIN. In demo mode, '123456' is accepted as universal PIN.")
+    role: str = Field("worker", description="'worker' or 'employer' (internally stored as 'client')")
     trade: TradeType | None = Field(None, description="Artisan track if role is worker")
 
 
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     phone: str = Field(..., description="Phone number in national or E.164 format")
-    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="6-digit security PIN")
+    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="6-digit security PIN. In demo mode, '123456' is accepted as universal PIN.")
 
 
 class ResendOTPRequest(BaseModel):
@@ -53,7 +53,7 @@ class TokenResponse(BaseModel):
     name: str
     phone: str
     is_worker: bool
-    is_client: bool
+    is_client: bool = Field(..., description="True if user is an employer (internally stored as 'client' role)")
 
 
 class UserProfileResponse(BaseModel):
@@ -62,10 +62,23 @@ class UserProfileResponse(BaseModel):
     name: str
     phone: str
     is_worker: bool
-    is_client: bool
+    is_client: bool = Field(..., description="True if user is an employer (internally stored as 'client' role)")
     is_supervisor: bool
     payout_account_number: str | None = None
     payout_bank_code: str | None = None
+    needs_pin_setup: bool = Field(False, description="True if this is a Telegram account that has not yet set a web PIN")
+
+
+class RequestSetPinRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    phone: str = Field(..., description="Phone number of the Telegram-registered account")
+
+
+class SetPinRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    phone: str = Field(..., description="Phone number of the Telegram-registered account")
+    otp_code: str = Field(..., min_length=4, max_length=10, description="OTP sent via SMS")
+    new_pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="New 6-digit PIN")
 
 
 # --- Job Schemas ---
@@ -102,6 +115,7 @@ class JobDayResponse(BaseModel):
     status: DayStatus
     done_at: Any = None
     release_at: Any = None
+    proof_photo: str | None = None
 
 
 class JobResponse(BaseModel):
@@ -110,6 +124,9 @@ class JobResponse(BaseModel):
     client_id: uuid.UUID
     worker_id: uuid.UUID | None
     supervisor_id: uuid.UUID | None
+    supervisor_name: str | None = None
+    supervisor_phone: str | None = None
+    supervisor_token: str | None = None
     trade: str
     description: str
     total_kobo: int
@@ -167,6 +184,56 @@ class DisputeResolveRequest(BaseModel):
     resolution_note: str = Field(..., min_length=5, max_length=500)
     worker_amount_kobo: int | None = None
     client_amount_kobo: int | None = None
+
+
+# --- Assign Worker Schema ---
+class AssignWorkerRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    worker_phone: str | None = Field(None, description="Phone number of the artisan to assign")
+    worker_id: uuid.UUID | None = Field(None, description="UUID of registered artisan to assign")
+
+
+# --- Supervisor Schemas ---
+class AssignSupervisorRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    supervisor_name: str = Field(..., min_length=2, max_length=150)
+    supervisor_phone: str = Field(..., description="Phone number in national or E.164 format")
+
+
+class SupervisorConfirmDayRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    proof_photo: str | None = Field(None, description="Optional base64 data URL or image URL attached on confirm")
+    phone: str | None = Field(None, description="Optional supervisor phone number for identity cross-check")
+
+
+class SupervisorDisputeDayRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class SupervisorDayScheduleItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    day_number: int
+    amount_kobo: int
+    status: DayStatus
+    done_at: Any = None
+    release_at: Any = None
+    proof_photo: str | None = None
+
+
+class SupervisorJobViewResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    trade: str
+    description: str
+    total_kobo: int
+    days_count: int
+    status: JobStatus
+    worker_name: str | None = None
+    supervisor_name: str | None = None
+    supervisor_phone: str | None = None
+    days_schedule: list[SupervisorDayScheduleItem] = []
 
 
 # --- Worker Payment Link Schema ---
