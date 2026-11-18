@@ -8,10 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.enums import DayStatus, JobStatus
+from app.core.security import verify_pin
 from app.core.utils import kobo_to_naira_str, normalize_phone_number
-from app.db.models import Job, User
+from app.db.models import AuditEvent, Job, User, Withdrawal
 from app.services.release_service import ReleaseService
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,10 @@ class USSDBalanceResponse(BaseModel):
     trade: str
     total_earned_kobo: int
     total_earned_naira: str
+    total_withdrawn_kobo: int = 0
+    total_withdrawn_naira: str = "₦0.00"
+    available_balance_kobo: int = 0
+    available_balance_naira: str = "₦0.00"
     paga_account_number: str
     bank_name: str = "Paga"
     display_text: str
@@ -65,6 +71,10 @@ class USSDReportDoneResponse(BaseModel):
 
 class USSDWithdrawRequest(BaseModel):
     phone: str = Field(..., description="Worker's phone number")
+    amount_naira: float | int | None = Field(None, description="Withdrawal amount in Naira. If omitted, returns balance/account inquiry.")
+    bank_code: str | None = Field(None, description="Destination bank 3-digit CBN code (e.g. '058')")
+    account_number: str | None = Field(None, description="10-digit NUBAN destination account number")
+    pin: str | None = Field(None, description="6-digit worker security PIN")
 
 
 class USSDWithdrawResponse(BaseModel):
@@ -72,6 +82,9 @@ class USSDWithdrawResponse(BaseModel):
     worker_name: str
     account_number: str
     bank_name: str
+    amount_withdrawn_naira: str | None = None
+    remaining_balance_naira: str | None = None
+    reference: str | None = None
     message: str
     display_text: str
 
@@ -98,6 +111,7 @@ async def _get_worker_by_phone(db: AsyncSession, raw_phone: str) -> User:
         .options(
             selectinload(User.worker_profile),
             selectinload(User.jobs_as_worker).selectinload(Job.days_schedule),
+            selectinload(User.withdrawals),
         )
     )
     user = (await db.execute(stmt)).scalar_one_or_none()
@@ -134,7 +148,15 @@ async def get_ussd_balance(
         for d in job.days_schedule
         if d.status == DayStatus.PAID.value
     )
+    total_withdrawn_kobo = sum(
+        w.amount_kobo for w in (worker.withdrawals or []) if w.status == "SUCCESS"
+    )
+    available_balance_kobo = max(0, total_earned_kobo - total_withdrawn_kobo)
+
     total_naira = kobo_to_naira_str(total_earned_kobo)
+    total_withdrawn_naira = kobo_to_naira_str(total_withdrawn_kobo)
+    available_naira = kobo_to_naira_str(available_balance_kobo)
+
     account_num = (
         worker.worker_profile.paga_account_number
         if worker.worker_profile and worker.worker_profile.paga_account_number
@@ -145,6 +167,7 @@ async def get_ussd_balance(
     display_text = (
         f"PROVO Balance:\n"
         f"Total Paid: {total_naira}\n"
+        f"Available: {available_naira}\n"
         f"Paga Account: {account_num}"
     )
 
@@ -154,6 +177,10 @@ async def get_ussd_balance(
         trade=trade,
         total_earned_kobo=total_earned_kobo,
         total_earned_naira=total_naira,
+        total_withdrawn_kobo=total_withdrawn_kobo,
+        total_withdrawn_naira=total_withdrawn_naira,
+        available_balance_kobo=available_balance_kobo,
+        available_balance_naira=available_naira,
         paga_account_number=account_num,
         bank_name="Paga",
         display_text=display_text,
@@ -262,7 +289,7 @@ async def ussd_report_done(
 @router.post(
     "/withdraw",
     response_model=USSDWithdrawResponse,
-    summary="Key 3: Check Wage Disbursement Account",
+    summary="Key 3: Request Withdrawal or Check Wage Disbursement Account",
 )
 async def ussd_withdraw(
     payload: USSDWithdrawRequest,
@@ -271,19 +298,117 @@ async def ussd_withdraw(
     worker = await _get_worker_by_phone(db, payload.phone)
 
     account_num = (
-        worker.worker_profile.paga_account_number
-        if worker.worker_profile and worker.worker_profile.paga_account_number
-        else worker.payout_account_number or "9900000001"
+        payload.account_number
+        or (
+            worker.worker_profile.paga_account_number
+            if worker.worker_profile and worker.worker_profile.paga_account_number
+            else worker.payout_account_number or "9900000001"
+        )
     )
-    bank_name = "Paga"
+    bank_name = payload.bank_code or "Paga"
 
-    msg = f"Available wages disburse automatically to Paga NUBAN {account_num} upon daily client confirmation."
+    # Calculate current balance
+    total_earned_kobo = sum(
+        d.amount_kobo
+        for job in worker.jobs_as_worker
+        for d in job.days_schedule
+        if d.status == DayStatus.PAID.value
+    )
+    total_withdrawn_kobo = sum(
+        w.amount_kobo for w in (worker.withdrawals or []) if w.status == "SUCCESS"
+    )
+    available_balance_kobo = max(0, total_earned_kobo - total_withdrawn_kobo)
+
+    # If amount_naira is not specified or None, behave as inquiry (backward compatible)
+    if payload.amount_naira is None:
+        msg = f"Available wages ({kobo_to_naira_str(available_balance_kobo)}) disburse automatically to Paga NUBAN {account_num} upon daily client confirmation."
+        return USSDWithdrawResponse(
+            status="success",
+            worker_name=worker.name,
+            account_number=account_num,
+            bank_name=bank_name,
+            remaining_balance_naira=kobo_to_naira_str(available_balance_kobo),
+            message=msg,
+            display_text=msg,
+        )
+
+    # If amount_naira is provided, perform withdrawal
+    if payload.amount_naira <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Withdrawal amount must be greater than zero.",
+        )
+
+    requested_kobo = int(round(float(payload.amount_naira) * 100))
+
+    # Verify PIN
+    pin = (payload.pin or "").strip()
+    is_demo = settings.DEMO_MODE and pin == "123456"
+    pin_valid = False
+    if is_demo:
+        pin_valid = True
+    elif worker.pin_hash and pin:
+        pin_valid = verify_pin(pin, worker.pin_hash)
+
+    if not pin_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid transaction PIN.",
+        )
+
+    # Check sufficient available balance
+    if requested_kobo > available_balance_kobo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Insufficient available balance. "
+                f"Available: {kobo_to_naira_str(available_balance_kobo)}, "
+                f"requested: {kobo_to_naira_str(requested_kobo)}."
+            ),
+        )
+
+    # Persist withdrawal
+    ref = f"WD-{uuid.uuid4().hex[:10].upper()}"
+    withdrawal = Withdrawal(
+        worker_id=worker.id,
+        amount_kobo=requested_kobo,
+        destination_account=account_num,
+        destination_bank=bank_name,
+        reference=ref,
+        status="SUCCESS",
+    )
+    db.add(withdrawal)
+
+    # Audit event
+    new_available_kobo = available_balance_kobo - requested_kobo
+    audit = AuditEvent(
+        entity_name="users",
+        entity_id=str(worker.id),
+        action="WORKER_WITHDRAWAL",
+        actor="USSD",
+        payload={
+            "reference": ref,
+            "amount_kobo": requested_kobo,
+            "destination_account": account_num,
+            "destination_bank": bank_name,
+            "remaining_balance_kobo": new_available_kobo,
+        },
+    )
+    db.add(audit)
+    await db.commit()
+
+    withdrawn_naira = kobo_to_naira_str(requested_kobo)
+    remaining_naira = kobo_to_naira_str(new_available_kobo)
+    msg = f"Withdrawal of {withdrawn_naira} to {bank_name} ({account_num}) successful. New balance: {remaining_naira}."
 
     return USSDWithdrawResponse(
         status="success",
         worker_name=worker.name,
         account_number=account_num,
         bank_name=bank_name,
+        amount_withdrawn_naira=withdrawn_naira,
+        remaining_balance_naira=remaining_naira,
+        reference=ref,
         message=msg,
         display_text=msg,
     )
@@ -333,12 +458,21 @@ async def ussd_gateway(
             for d in job.days_schedule
             if d.status == DayStatus.PAID.value
         )
+        total_withdrawn_kobo = sum(
+            w.amount_kobo for w in (worker.withdrawals or []) if w.status == "SUCCESS"
+        )
+        available_kobo = max(0, total_earned_kobo - total_withdrawn_kobo)
         account_num = (
             worker.worker_profile.paga_account_number
             if worker.worker_profile and worker.worker_profile.paga_account_number
             else "Not set"
         )
-        msg = f"END PROVO Balance:\nTotal Paid: {kobo_to_naira_str(total_earned_kobo)}\nPaga Account: {account_num}"
+        msg = (
+            f"END PROVO Balance:\n"
+            f"Total Paid: {kobo_to_naira_str(total_earned_kobo)}\n"
+            f"Available: {kobo_to_naira_str(available_kobo)}\n"
+            f"Paga Account: {account_num}"
+        )
         return USSDGatewayResponse(action="END", message=msg)
 
     elif choice == "2":
@@ -357,12 +491,22 @@ async def ussd_gateway(
         return USSDGatewayResponse(action="END", message="\n".join(lines))
 
     elif choice == "3":
+        total_earned_kobo = sum(
+            d.amount_kobo
+            for job in worker.jobs_as_worker
+            for d in job.days_schedule
+            if d.status == DayStatus.PAID.value
+        )
+        total_withdrawn_kobo = sum(
+            w.amount_kobo for w in (worker.withdrawals or []) if w.status == "SUCCESS"
+        )
+        available_kobo = max(0, total_earned_kobo - total_withdrawn_kobo)
         account_num = (
             worker.worker_profile.paga_account_number
             if worker.worker_profile and worker.worker_profile.paga_account_number
             else "Paga NUBAN"
         )
-        msg = f"END Wages are paid directly to your Paga Account ({account_num}) automatically upon daily confirmation."
+        msg = f"END Wages are paid directly to your Paga Account ({account_num}) automatically upon daily confirmation. Available: {kobo_to_naira_str(available_kobo)}"
         return USSDGatewayResponse(action="END", message=msg)
 
     else:

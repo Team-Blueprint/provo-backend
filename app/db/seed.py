@@ -18,6 +18,7 @@ from app.db.models import (
     Payout,
     Receipt,
     User,
+    Withdrawal,
     WorkerProfile,
 )
 
@@ -97,6 +98,7 @@ async def seed_database():
                     await session.execute(delete(JobDay).where(JobDay.job_id.in_(old_job_ids)))
                     await session.execute(delete(Job).where(Job.id.in_(old_job_ids)))
 
+                await session.execute(delete(Withdrawal).where(Withdrawal.worker_id.in_(old_user_ids)))
                 await session.execute(delete(Consent).where(Consent.worker_id.in_(old_user_ids)))
                 await session.execute(delete(WorkerProfile).where(WorkerProfile.user_id.in_(old_user_ids)))
                 await session.execute(delete(User).where(User.id.in_(old_user_ids)))

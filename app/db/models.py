@@ -77,6 +77,9 @@ class User(Base, TimestampMixin):
     jobs_as_supervisor: Mapped[list[Job]] = relationship(
         "Job", back_populates="supervisor", foreign_keys="Job.supervisor_id"
     )
+    withdrawals: Mapped[list[Withdrawal]] = relationship(
+        "Withdrawal", back_populates="worker", foreign_keys="Withdrawal.worker_id", cascade="all, delete-orphan"
+    )
 
 
 class WorkerProfile(Base, TimestampMixin):
@@ -219,6 +222,21 @@ class Payout(Base, TimestampMixin):
     paga_response: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     day: Mapped[JobDay] = relationship("JobDay", back_populates="payout")
+
+
+class Withdrawal(Base, TimestampMixin):
+    """Worker ledger withdrawal and bank transfer record."""
+    __tablename__ = "withdrawals"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    worker_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), index=True, nullable=False)
+    amount_kobo: Mapped[int] = mapped_column(Integer, nullable=False)
+    destination_account: Mapped[str] = mapped_column(String(30), nullable=False)
+    destination_bank: Mapped[str] = mapped_column(String(50), nullable=False)
+    reference: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="SUCCESS", nullable=False)
+
+    worker: Mapped[User] = relationship("User", back_populates="withdrawals", foreign_keys=[worker_id])
 
 
 class Dispute(Base, TimestampMixin):
