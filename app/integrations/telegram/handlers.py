@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.enums import DayStatus, JobStatus
 from app.core.utils import kobo_to_naira_str, normalize_phone_number
@@ -99,7 +100,8 @@ async def handle_start(message: Message) -> None:
             if sup_job:
                 worker_name = sup_job.worker.name if sup_job.worker else "Assigned Artisan"
                 token_val = sup_job.supervisor_token
-                web_link = f"https://proofwork.app/supervisor/verify?job={sup_job.id}&token={token_val}"
+                web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
+                web_link = f"{web_base}/supervisor/verify?job={sup_job.id}&token={token_val}"
 
                 # Render schedule with zero employer PII
                 days_summary = []
@@ -424,11 +426,17 @@ async def handle_client_posted_jobs(message: Message) -> None:
         for job in jobs:
             worker_name = job.worker.name if job.worker else "Not assigned"
             supervisor_name = job.supervisor_name if job.supervisor_name else "None assigned"
+            supervisor_info = f"  Supervisor: {supervisor_name}\n"
+            if job.supervisor_token:
+                web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
+                sup_link = f"{web_base}/supervisor/verify?job={job.id}&token={job.supervisor_token}"
+                supervisor_info = f"  Supervisor: {supervisor_name}\n  Link: {sup_link}\n"
+
             job_text = (
                 f"• *{job.trade}*: {job.description}\n"
                 f"  Total: {kobo_to_naira_str(job.total_kobo)} | Status: `{job.status}`\n"
                 f"  Artisan: {worker_name}\n"
-                f"  Supervisor: {supervisor_name}\n"
+                f"{supervisor_info}"
                 f"  Account: `{job.paga_account_number or 'pending'}`"
             )
             can_assign_worker = (
@@ -665,17 +673,25 @@ async def handle_assign_supervisor_phone(message: Message, state: FSMContext) ->
             await session.commit()
 
             clean_phone = job.supervisor_phone
-            sup_link = f"https://proofwork.app/supervisor/verify?job={job.id}&token={job.supervisor_token}"
-            bot_link = f"https://t.me/provo_bot?start={job.supervisor_token}"
+            web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
+            sup_link = f"{web_base}/supervisor/verify?job={job.id}&token={job.supervisor_token}"
+            bot_username = settings.TELEGRAM_BOT_USERNAME or "Provvo_bot"
+            bot_link = f"https://t.me/{bot_username}?start={job.supervisor_token}"
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Open Supervisor Web View", url=sup_link)],
+                [InlineKeyboardButton(text="🤖 Open in Telegram", url=bot_link)],
+            ])
 
             await message.answer(
-                f"✅ *Supervisor Assigned Successfully!*\n\n"
-                f"• *Name:* {job.supervisor_name}\n"
-                f"• *Phone:* `{clean_phone}`\n\n"
-                f"🔗 *Supervisor Verification Link:*\n{sup_link}\n\n"
-                f"🤖 *Telegram Bot Direct Link:*\n{bot_link}\n\n"
-                f"_Share either link with {job.supervisor_name}. They can inspect and confirm work daily without needing a password!_",
-                parse_mode="Markdown",
+                f"✅ <b>Supervisor Assigned Successfully!</b>\n\n"
+                f"• <b>Name:</b> {job.supervisor_name}\n"
+                f"• <b>Phone:</b> <code>{clean_phone}</code>\n\n"
+                f"🔗 <b>Supervisor Verification Link:</b>\n<code>{sup_link}</code>\n\n"
+                f"🤖 <b>Telegram Bot Direct Link:</b>\n<code>{bot_link}</code>\n\n"
+                f"<i>Share either link with {job.supervisor_name}. They can inspect and confirm work daily without needing a password!</i>",
+                parse_mode="HTML",
+                reply_markup=kb,
             )
         except ValueError as e:
             await message.answer(f"❌ Failed to assign supervisor: {e}")
@@ -914,7 +930,7 @@ async def handle_my_record(message: Message) -> None:
 
         reply_text = (
             f"📊 *Provo Verified Record for {user.name}:*\n\n"
-            f"• *Credit Score:* {score_res.score} / 100\n"
+            f"• *Profile Score:* {score_res.score} / 100\n"
             f"• *Rating Tier:* `{score_res.band}`\n"
             f"• *Confirmed Days:* {score_res.confirmed_days}\n"
             f"• *Auto-Released Days:* {score_res.auto_released_days}\n"

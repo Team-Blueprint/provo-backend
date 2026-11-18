@@ -201,7 +201,7 @@ class MessagingService:
         alert_text = (
             f"Proofwork Alert: {amount_str} received from {client_phone}.\n"
             f"Status: {status_text}.\n"
-            f"Once verified by the client, it is added to your lender credit score."
+            f"Once verified by the client, it is added to your lender Profile Score."
         )
 
         if settings.WHATSAPP_TOKEN and settings.WHATSAPP_PHONE_NUMBER_ID:

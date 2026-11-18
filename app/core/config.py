@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     OTP_MAX_ATTEMPTS: int = 5
 
     BASE_URL: str = "http://localhost:8000"
+    WEB_BASE_URL: str = "https://useprovo.vercel.app"
 
     # Auto-release window for daily escrow
     AUTO_RELEASE_WINDOW_HOURS: float = 24.0

@@ -5,6 +5,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from app.core.config import settings
 from app.core.enums import TradeType
 
 
@@ -78,10 +79,11 @@ def day_review_inline_keyboard(
         )
     ])
     if supervisor_token:
+        web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
         rows.append([
             InlineKeyboardButton(
                 text="🌐 Supervisor Web Link",
-                url=f"https://proofwork.app/supervisor/verify?job={job_id}&token={supervisor_token}",
+                url=f"{web_base}/supervisor/verify?job={job_id}&token={supervisor_token}",
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -118,10 +120,11 @@ def fund_job_inline_keyboard(
             )
         ])
     elif supervisor_token:
+        web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
         buttons.append([
             InlineKeyboardButton(
                 text="🔗 Supervisor Web Link",
-                url=f"https://proofwork.app/supervisor/verify?job={job_id}&token={supervisor_token}",
+                url=f"{web_base}/supervisor/verify?job={job_id}&token={supervisor_token}",
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -144,10 +147,11 @@ def employer_job_actions_keyboard(
             InlineKeyboardButton(text="🕵️ Assign Supervisor", callback_data=f"assign_supervisor:{job_id}")
         ])
     elif supervisor_token:
+        web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
         buttons.append([
             InlineKeyboardButton(
                 text="🔗 Supervisor Link",
-                url=f"https://proofwork.app/supervisor/verify?job={job_id}&token={supervisor_token}",
+                url=f"{web_base}/supervisor/verify?job={job_id}&token={supervisor_token}",
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
@@ -221,10 +225,11 @@ def set_pin_keyboard(phone: str) -> InlineKeyboardMarkup:
     """Inline keyboard to redirect user to web PIN setup page."""
     import urllib.parse
     encoded_phone = urllib.parse.quote(phone)
+    web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
     kb = [
         [InlineKeyboardButton(
             text="🔐 Set Web PIN",
-            url=f"https://proofwork.app/set-pin?phone={encoded_phone}",
+            url=f"{web_base}/set-pin?phone={encoded_phone}",
         )],
         [InlineKeyboardButton(text="⏭️ Skip for now", callback_data="skip_pin_setup")],
     ]

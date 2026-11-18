@@ -6,6 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal, Base, engine
 from app.core.enums import DayStatus, JobStatus, TradeType
 from app.core.security import hash_pin
@@ -283,8 +284,8 @@ async def test_telegram_assign_supervisor_fsm():
     response_text = phone_msg.answer.call_args[0][0]
     assert "Supervisor Assigned Successfully!" in response_text
     assert "Engr. Nnamdi" in response_text
-    assert "https://proofwork.app/supervisor/verify" in response_text
-    assert "t.me/provo_bot?start=sup_" in response_text
+    assert "https://useprovo.vercel.app/supervisor/verify" in response_text
+    assert f"t.me/{settings.TELEGRAM_BOT_USERNAME}?start=sup_" in response_text
 
     # Verify DB state
     async with AsyncSessionLocal() as session:

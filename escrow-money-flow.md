@@ -98,7 +98,7 @@ received_kobo = sum(p.amount_kobo for p in job.payments_in)
 ### Case C: Overfunding (`received_kobo > job.total_kobo`)
 *Common causes: client sends ₦45,000 for a ₦42,000 job, or sends ₦42,000 twice during a bank-app timeout.*
 - **Lock the job immediately** (`AWAITING_FUNDING` → `FUNDED`) for `job.total_kobo` and **deactivate the NUBAN immediately** to block further transfers.
-- **Never inflate `job_days.amount_kobo`** with the excess (that corrupts the agreed daily rate and distorts the worker's credit score).
+- **Never inflate `job_days.amount_kobo`** with the excess (that corrupts the agreed daily rate and distorts the worker's Profile Score).
 - Record two ledger entries:
   - `FUNDED`: `job.total_kobo` (backs the daily schedule)
   - `EXCESS_HELD`: `received_kobo - job.total_kobo`

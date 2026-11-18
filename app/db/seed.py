@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import Base, async_session_maker, engine
 from app.core.enums import DayStatus, JobStatus, LedgerKind, PayoutStatus, TradeType
 from app.core.security import hash_pin
@@ -29,13 +30,13 @@ async def seed_database():
          - 4 completed jobs (18 paid days total) across 4 months
          - 2 unique repeat confirmed payers (Chief Adeleke & Amina Bello)
          - 0 cash, 100% escrow bank transfers, 0 auto-releases
-         - Tier 1 Credit Score (~87/100)
+         - Tier 1 Profile Score (~87/100)
          - Share Token: EMEM-CREDIT-EVAL-2026
       2. Tunde Bakare (+2348022223333, PIN 123456, PLUMBING, Lagos)
          - 2 completed jobs (6 paid days total)
          - 1 auto-release (0.5x penalty)
          - 3 cash days (capping rule demonstration)
-         - Tier 3 Credit Score (~54/100)
+         - Tier 3 Profile Score (~54/100)
          - Share Token: TUNDE-CREDIT-EVAL-2026
     - Exactly 2 Employers:
       1. Chief Babatunde Adeleke (+2348077778888, PIN 123456)
@@ -535,11 +536,12 @@ async def seed_database():
     print(f"👔 Employer 1: Chief Babatunde Adeleke ({chief_adeleke.phone}) - Commercial Client")
     print(f"👔 Employer 2: Amina Bello ({amina_bello.phone}) - Residential Client")
     print(f"🕵️ Site Supervisor: Segun Odegbami ({segun_supervisor.phone})")
+    web_base = getattr(settings, "WEB_BASE_URL", "https://useprovo.vercel.app")
     print("\n--- DEMO URLS ---")
-    print("👉 Emem's Lender Report: http://localhost:8000/reports/EMEM-CREDIT-EVAL-2026/view")
-    print("👉 Tunde's Lender Report: http://localhost:8000/reports/TUNDE-CREDIT-EVAL-2026/view")
-    print("👉 Site Supervisor Portal: http://localhost:8000/site/SEG-SUPERVISOR-TOKEN-001/view")
-    print(f"👉 Draft Job Checkout: http://localhost:8000/checkout/{draft_job.id}")
+    print(f"👉 Emem's Lender Report: {web_base}/reports/EMEM-CREDIT-EVAL-2026/view")
+    print(f"👉 Tunde's Lender Report: {web_base}/reports/TUNDE-CREDIT-EVAL-2026/view")
+    print(f"👉 Site Supervisor Portal: {web_base}/supervisor/verify?job={active_job.id}&token=SEG-SUPERVISOR-TOKEN-001")
+    print(f"👉 Draft Job Checkout: {web_base}/checkout/{draft_job.id}")
 
 
 if __name__ == "__main__":

@@ -326,7 +326,7 @@ async def view_lender_report_portal(
 ):
     """
     Financial institution and lender view of the worker's verified credit report.
-    Presents credit score, payer diversity matrix, and income stability metrics.
+    Presents Profile Score, payer diversity matrix, and income stability metrics.
     """
     report = await report_service.generate_lender_report(db, token)
     if not report or "error" in report:
