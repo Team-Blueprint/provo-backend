@@ -1,0 +1,18 @@
+{
+  "transactionId": "PAGA-TXN-10002",
+  "referenceNumber": "PW-TRANSFER-2026-002",
+  "accountNumber": "9876543210",
+  "accountReference": "PW-ACC-EMEM-001",
+  "amount": 40000.0,
+  "currency": "NGN",
+  "fee": 100.0,
+  "datetime": "2026-11-16T12:05:00Z",
+  "status": "SUCCESS",
+  "payerName": "Engr Udoh",
+  "payerBank": "First Bank of Nigeria",
+  "payerAccountNumber": "3012345678",
+  "payerPhone": "+2348099887766",
+  "channel": "BANK_TRANSFER",
+  "grade": "GRADE_2_TRANSFER",
+  "hash": "mocked_paga_hash_grade2"
+}

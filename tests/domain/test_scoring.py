@@ -57,3 +57,73 @@ def test_auto_released_discount_and_alert():
     assert res.auto_release_ratio == 1.0
     # High auto-release warning should be in reasons
     assert any("High auto-release proportion" in r for r in res.reasons)
+
+
+def test_unique_confirmed_payers_not_raw_payments():
+    now = datetime(2026, 6, 15, tzinfo=UTC)
+    # 5 confirmed payments from the same client
+    history = [
+        DayScoreInput(f"job-{i}", "client-single", 50000, DayStatus.CONFIRMED, now)
+        for i in range(1, 6)
+    ]
+    res = calculate_worker_score(history)
+    assert res.confirmed_days == 5
+    # Unique payers must be exactly 1, not 5
+    assert res.unique_payers == 1
+    # Payer score is 8 pts (not 5 * 8 = 40 pts)
+    assert any("1 unique verified payer" in r for r in res.reasons)
+
+
+def test_circular_payment_detection_and_penalty():
+    now = datetime(2026, 6, 15, tzinfo=UTC)
+    history = [
+        DayScoreInput("job-1", "client-circular", 100000, DayStatus.CONFIRMED, now),
+        DayScoreInput("job-2", "client-normal", 100000, DayStatus.CONFIRMED, now),
+    ]
+    # Without circular flag
+    clean_res = calculate_worker_score(history)
+    assert clean_res.circular_flow_detected is False
+
+    # With circular flag
+    flagged_res = calculate_worker_score(history, circular_payer_ids={"client-circular"})
+    assert flagged_res.circular_flow_detected is True
+    assert flagged_res.score == clean_res.score - 20
+    assert any("CIRCULAR_FLOW_DETECTED" in r for r in flagged_res.reasons)
+
+
+def test_new_payer_down_weighting():
+    now = datetime(2026, 6, 15, tzinfo=UTC)
+    # Established payer
+    est_history = [
+        DayScoreInput("job-1", "client-1", 100000, DayStatus.CONFIRMED, now, client_is_new_to_system=False),
+    ]
+    est_res = calculate_worker_score(est_history)
+
+    # New unproven payer with no prior system history
+    new_history = [
+        DayScoreInput("job-1", "client-1", 100000, DayStatus.CONFIRMED, now, client_is_new_to_system=True),
+    ]
+    new_res = calculate_worker_score(new_history)
+
+    # Points for new payer should be lower due to 0.7x discount
+    assert any("discounted by 30%" in r for r in new_res.reasons)
+    assert new_res.score < est_res.score
+
+
+def test_cash_job_cap_at_twenty_percent():
+    now = datetime(2026, 6, 15, tzinfo=UTC)
+    # 2 escrow days (+4 pts) + 10 cash days (+20 raw pts, which would exceed 20% cap)
+    history = [
+        DayScoreInput("job-escrow-1", "client-1", 100000, DayStatus.CONFIRMED, now, is_cash=False),
+        DayScoreInput("job-escrow-2", "client-2", 100000, DayStatus.CONFIRMED, now, is_cash=False),
+    ]
+    for i in range(10):
+        history.append(
+            DayScoreInput(f"job-cash-{i}", f"client-cash-{i}", 50000, DayStatus.CONFIRMED, now, is_cash=True)
+        )
+
+    res = calculate_worker_score(history)
+    assert res.cash_days == 10
+    # Cash points must be capped and reason logged
+    assert any("Cash job contribution capped at 20%" in r for r in res.reasons)
+

@@ -1,0 +1,9 @@
+{
+  "responseCode": 0,
+  "message": "Persistent payment account successfully created",
+  "accountNumber": "9876543210",
+  "accountReference": "PW-ACC-EMEM-001",
+  "bankName": "Paga / Parkway MFB",
+  "accountName": "Proofwork / Emem Okon",
+  "statusCode": 200
+}

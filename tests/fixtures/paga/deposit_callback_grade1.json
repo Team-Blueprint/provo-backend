@@ -1,0 +1,15 @@
+{
+  "transactionId": "PAGA-TXN-10001",
+  "referenceNumber": "PW-REQ-2026-001",
+  "amount": 25000.0,
+  "currency": "NGN",
+  "fee": 150.0,
+  "datetime": "2026-11-16T12:00:00Z",
+  "status": "SUCCESS",
+  "payerName": "Chief Bassey",
+  "payerPhone": "+2348031234567",
+  "accountReference": "PW-ACC-EMEM-001",
+  "channel": "PAYMENT_LINK",
+  "grade": "GRADE_1_LINK",
+  "hash": "mocked_paga_hash_grade1"
+}

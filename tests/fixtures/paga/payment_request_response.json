@@ -1,0 +1,9 @@
+{
+  "responseCode": 0,
+  "message": "Payment request initiated successfully",
+  "referenceNumber": "PW-REQ-2026-001",
+  "paymentUrl": "https://beta.mypaga.com/pay/PW-REQ-2026-001",
+  "amount": 25000.0,
+  "currency": "NGN",
+  "statusCode": 200
+}

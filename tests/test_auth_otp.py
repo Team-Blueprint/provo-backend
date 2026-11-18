@@ -110,8 +110,8 @@ async def test_passwordless_login_for_registered_user():
         assert "Account not yet verified" in unverified_res.json()["detail"]
 
         # Verify phone with demo or real OTP code
-        otp_code = signup_res.json()["otp_code"]
-        verify_res = await client.post("/auth/verify-otp", json={"phone": "+2348099998888", "code": otp_code})
+        assert "otp_code" not in signup_res.json()
+        verify_res = await client.post("/auth/verify-otp", json={"phone": "+2348099998888", "code": "123456"})
         assert verify_res.status_code == 200
 
         # Login with correct PIN now succeeds directly without OTP!
@@ -126,7 +126,7 @@ async def test_passwordless_login_for_registered_user():
         resend_res = await client.post("/auth/resend-otp", json={"phone": "+2348099998888"})
         assert resend_res.status_code == 200
         assert "Fresh verification code" in resend_res.json()["message"]
-        assert resend_res.json()["otp_code"] is not None
+        assert "otp_code" not in resend_res.json()
 
 
 @pytest.mark.asyncio
@@ -146,7 +146,7 @@ async def test_unified_worker_and_client_signup_and_refresh():
         )
         assert worker_res.status_code == 201
         worker_data = worker_res.json()
-        assert worker_data["otp_code"] is not None
+        assert "otp_code" not in worker_data
 
         # Client signup
         client_res = await client.post(
@@ -160,14 +160,14 @@ async def test_unified_worker_and_client_signup_and_refresh():
         )
         assert client_res.status_code == 201
         client_data = client_res.json()
-        assert client_data["otp_code"] is not None
+        assert "otp_code" not in client_data
 
         # Verify client OTP to get real refresh_token
         verify_client = await client.post(
             "/auth/verify-otp",
             json={
                 "phone": "+2348022223333",
-                "code": client_data["otp_code"],
+                "code": "123456",
             },
         )
         assert verify_client.status_code == 200

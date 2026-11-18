@@ -3,7 +3,7 @@ name = "proofwork-backend"
 version = "0.1.0"
 description = "Proofwork turns informal payments into verified income records for lenders."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "aiogram>=3.32.0",
     "aiosqlite>=0.20.0",

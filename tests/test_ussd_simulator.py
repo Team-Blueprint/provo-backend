@@ -16,7 +16,13 @@ async def prepare_database():
 
 
 @pytest.mark.asyncio
-async def test_ussd_simulator_endpoints_for_worker():
+async def test_ussd_simulator_endpoints_for_worker(monkeypatch):
+    # Mock SMS sending to avoid external 402 / network calls during test
+    from app.integrations.sms.client import SMSClient
+    async def mock_send_sms(*args, **kwargs):
+        return {"status": "success", "id": "mock-sms-id"}
+    monkeypatch.setattr(SMSClient, "send_sms", mock_send_sms)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # 1. Sign up worker
@@ -31,12 +37,12 @@ async def test_ussd_simulator_endpoints_for_worker():
             },
         )
         assert signup_res.status_code == 201
-        otp_code = signup_res.json()["otp_code"]
+        assert "otp_code" not in signup_res.json()
 
         # Verify OTP (this activates and provisions worker Paga account)
         verify_res = await client.post(
             "/auth/verify-otp",
-            json={"phone": "+2348122060708", "code": otp_code},
+            json={"phone": "+2348122060708", "code": "123456"},
         )
         assert verify_res.status_code == 200
         worker_id = verify_res.json()["user_id"]
@@ -51,10 +57,11 @@ async def test_ussd_simulator_endpoints_for_worker():
                 "role": "client",
             },
         )
-        c_otp = c_signup.json()["otp_code"]
+        assert c_signup.status_code == 201
+        assert "otp_code" not in c_signup.json()
         c_verify = await client.post(
             "/auth/verify-otp",
-            json={"phone": "+2348033334444", "code": c_otp},
+            json={"phone": "+2348033334444", "code": "123456"},
         )
         client_token = c_verify.json()["access_token"]
 

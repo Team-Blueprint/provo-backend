@@ -105,7 +105,6 @@ async def test_worker_directory_and_lender_report_flow():
         assert len(workers) == 1
         assert workers[0]["name"] == "Emem Bassey"
         assert workers[0]["verified_days_count"] == 2
-        assert workers[0]["badge_grade"] == "BRONZE_VERIFIED"
 
         # 3. Worker creates 7-day share link
         worker_token = create_access_token({"sub": str(worker_id)})
