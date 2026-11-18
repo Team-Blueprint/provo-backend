@@ -10,16 +10,18 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.enums import DayStatus, JobStatus
-from app.core.security import verify_pin
+from app.core.enums import DayStatus, JobStatus, TradeType
+from app.core.security import hash_pin, verify_pin
 from app.core.utils import kobo_to_naira_str, normalize_phone_number
-from app.db.models import AuditEvent, Job, User, Withdrawal
+from app.db.models import AuditEvent, Job, User, Withdrawal, WorkerProfile
+from app.services.funding_service import FundingService
 from app.services.release_service import ReleaseService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ussd", tags=["USSD Simulator"])
 release_service = ReleaseService()
+funding_service = FundingService()
 
 
 # --- Schemas ---
@@ -101,10 +103,44 @@ class USSDGatewayResponse(BaseModel):
     message: str
 
 
+class USSDRegisterRequest(BaseModel):
+    phone: str = Field(..., description="Worker's phone number")
+    name: str = Field(..., min_length=2, max_length=150, description="Worker's full name")
+    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$", description="6-digit security PIN")
+    trade: str = Field(default="OTHER", description="Worker's trade/skill")
+
+
+class USSDRegisterResponse(BaseModel):
+    status: str = "success"
+    user_id: str
+    name: str
+    phone: str
+    role: str = "worker"
+    trade: str
+    paga_account_number: str | None = None
+    message: str
+    display_text: str
+
+
 # --- Helper ---
 
+def _normalize_trade(raw_trade: str | None) -> str:
+    if not raw_trade:
+        return TradeType.OTHER.value
+    clean = raw_trade.strip().upper()
+    try:
+        return TradeType[clean].value
+    except KeyError:
+        return TradeType.OTHER.value
+
 async def _get_worker_by_phone(db: AsyncSession, raw_phone: str) -> User:
-    clean_phone = normalize_phone_number(raw_phone)
+    try:
+        clean_phone = normalize_phone_number(raw_phone)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Phone {raw_phone} is not registered on PROVO.",
+        )
     stmt = (
         select(User)
         .where(User.phone == clean_phone)
@@ -129,6 +165,120 @@ async def _get_worker_by_phone(db: AsyncSession, raw_phone: str) -> User:
 
 
 # --- Endpoints ---
+
+@router.post(
+    "/register",
+    response_model=USSDRegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register New Worker via USSD",
+    description="Allows informal workers to create an artisan account via USSD. Defaults to worker role and automatically provisions a personal Paga NUBAN.",
+)
+async def ussd_register(
+    payload: USSDRegisterRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    clean_phone = normalize_phone_number(payload.phone)
+    clean_name = payload.name.strip()
+    clean_trade = _normalize_trade(payload.trade)
+    hashed_pin = hash_pin(payload.pin)
+
+    # Check if user already exists
+    stmt = (
+        select(User)
+        .where(User.phone == clean_phone)
+        .options(selectinload(User.worker_profile))
+    )
+    user = (await db.execute(stmt)).scalar_one_or_none()
+
+    if user and user.is_phone_verified:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An account with phone {clean_phone} already exists. Please dial *347*900# to access your account.",
+        )
+
+    if not user:
+        user = User(
+            name=clean_name,
+            phone=clean_phone,
+            pin_hash=hashed_pin,
+            is_phone_verified=True,
+            is_worker=True,
+            is_client=False,
+        )
+        db.add(user)
+        await db.flush()
+
+        profile = WorkerProfile(
+            user_id=user.id,
+            trade=clean_trade,
+            area="Uyo",
+            is_available=True,
+        )
+        db.add(profile)
+        await db.flush()
+    else:
+        # Existing unverified user (e.g. from an incomplete web signup)
+        user.name = clean_name
+        user.pin_hash = hashed_pin
+        user.is_phone_verified = True
+        user.is_worker = True
+        user.is_client = False
+        if user.worker_profile:
+            user.worker_profile.trade = clean_trade
+        else:
+            profile = WorkerProfile(
+                user_id=user.id,
+                trade=clean_trade,
+                area="Uyo",
+                is_available=True,
+            )
+            db.add(profile)
+        await db.flush()
+
+    # Provision personal Paga virtual account for wage disbursements
+    paga_account_num = None
+    try:
+        updated_profile = await funding_service.provision_worker_paga_account(db=db, user_id=user.id)
+        paga_account_num = updated_profile.paga_account_number
+    except Exception as e:
+        logger.warning("Could not provision Paga account for worker %s via USSD: %s", user.id, e)
+
+    # Audit trail
+    audit = AuditEvent(
+        entity_name="users",
+        entity_id=str(user.id),
+        action="USSD_WORKER_REGISTERED",
+        actor="USSD",
+        payload={
+            "phone": clean_phone,
+            "trade": clean_trade,
+            "paga_account": paga_account_num,
+        },
+    )
+    db.add(audit)
+    await db.commit()
+
+    msg = f"Artisan account created successfully for {clean_name} ({clean_trade})."
+    paga_disp = paga_account_num or "Pending"
+    display_text = (
+        f"CON Welcome to PROVO, {clean_name}!\n"
+        f"Your artisan account ({clean_trade}) is active.\n"
+        f"Paga Account: {paga_disp}\n"
+        f"Dial *347*900# anytime."
+    )
+
+    return USSDRegisterResponse(
+        status="success",
+        user_id=str(user.id),
+        name=user.name,
+        phone=user.phone,
+        role="worker",
+        trade=clean_trade,
+        paga_account_number=paga_account_num,
+        message=msg,
+        display_text=display_text,
+    )
+
 
 @router.get(
     "/balance",
@@ -449,6 +599,11 @@ async def ussd_gateway(
     try:
         worker = await _get_worker_by_phone(db, payload.phone_number)
     except HTTPException as e:
+        if e.status_code == status.HTTP_404_NOT_FOUND:
+            return USSDGatewayResponse(
+                action="END",
+                message="END Welcome to PROVO!\nYour phone is not registered yet.\nPlease register to access artisan jobs and escrow payments.",
+            )
         return USSDGatewayResponse(action="END", message=f"END {e.detail}")
 
     if choice == "1":

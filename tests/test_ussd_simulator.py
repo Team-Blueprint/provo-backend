@@ -327,3 +327,113 @@ async def test_ussd_withdrawal_lifecycle_and_balance_deduction(monkeypatch):
             records = (await session.execute(stmt)).scalars().all()
             assert len(records) == 2
             assert sum(r.amount_kobo for r in records) == 500000
+
+
+@pytest.mark.asyncio
+async def test_ussd_worker_registration_and_cross_channel_interop(monkeypatch):
+    """
+    Tests worker registration over USSD and verifies seamless cross-channel
+    interoperability when logging in via Web (PIN) and Telegram (contact match).
+    """
+    from app.integrations.sms.client import SMSClient
+    async def mock_send_sms(*args, **kwargs):
+        return {"status": "success", "id": "mock-sms-id"}
+    monkeypatch.setattr(SMSClient, "send_sms", mock_send_sms)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Register worker via USSD
+        reg_res = await client.post(
+            "/ussd/register",
+            json={
+                "phone": "+2348123456780",
+                "name": "Sunday Udoh",
+                "pin": "654321",
+                "trade": "CARPENTRY",
+            },
+        )
+        assert reg_res.status_code == 201
+        data = reg_res.json()
+        assert data["status"] == "success"
+        assert data["name"] == "Sunday Udoh"
+        assert data["phone"] == "+2348123456780"
+        assert data["role"] == "worker"
+        assert data["trade"] == "CARPENTRY"
+        assert data["paga_account_number"] is not None
+        assert "Welcome to PROVO, Sunday Udoh!" in data["display_text"]
+
+        # 2. Duplicate registration attempt with same phone -> 409 Conflict
+        dup_res = await client.post(
+            "/ussd/register",
+            json={
+                "phone": "+2348123456780",
+                "name": "Sunday Udoh Duplicate",
+                "pin": "654321",
+                "trade": "CARPENTRY",
+            },
+        )
+        assert dup_res.status_code == 409
+        assert "already exists" in dup_res.json()["detail"]
+
+        # 3. Invalid PIN validation -> 422 Unprocessable Entity
+        bad_pin_res = await client.post(
+            "/ussd/register",
+            json={
+                "phone": "+2348199990000",
+                "name": "Bad Pin Worker",
+                "pin": "123",  # Not 6 digits
+                "trade": "PLUMBING",
+            },
+        )
+        assert bad_pin_res.status_code == 422
+
+        # 4. Web Login Interoperability: Worker logs into Web App with USSD phone + PIN
+        web_login_res = await client.post(
+            "/auth/login",
+            json={
+                "phone": "+2348123456780",
+                "pin": "654321",
+            },
+        )
+        assert web_login_res.status_code == 200
+        web_data = web_login_res.json()
+        assert "access_token" in web_data
+        assert web_data["name"] == "Sunday Udoh"
+        assert web_data["is_worker"] is True
+
+        # 5. Telegram Linking Interoperability: Simulate Telegram contact matching
+        from app.core.database import AsyncSessionLocal
+        from app.db.models import User
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        tg_id = 77889911
+        async with AsyncSessionLocal() as session:
+            # Emulate telegram contact match logic
+            stmt = select(User).where(User.phone == "+2348123456780").options(selectinload(User.worker_profile))
+            matched_user = (await session.execute(stmt)).scalar_one()
+            matched_user.telegram_user_id = tg_id
+            await session.commit()
+
+        # Verify single user in database with both USSD trade and Telegram ID
+        async with AsyncSessionLocal() as session:
+            stmt = select(User).where(User.telegram_user_id == tg_id).options(selectinload(User.worker_profile))
+            tg_user = (await session.execute(stmt)).scalar_one()
+            assert tg_user.name == "Sunday Udoh"
+            assert tg_user.is_worker is True
+            assert tg_user.worker_profile.trade == "CARPENTRY"
+
+        # 6. Check USSD Balance for this new worker
+        bal_res = await client.get("/ussd/balance", params={"phone": "+2348123456780"})
+        assert bal_res.status_code == 200
+        bal_data = bal_res.json()
+        assert bal_data["worker_name"] == "Sunday Udoh"
+        assert bal_data["trade"] == "CARPENTRY"
+        assert bal_data["total_earned_kobo"] == 0
+        assert bal_data["available_balance_kobo"] == 0
+
+        # 7. Unregistered phone dialing USSD gateway
+        gateway_res = await client.post("/ussd", json={"phoneNumber": "+2348099887766", "text": "1"})
+        assert gateway_res.status_code == 200
+        assert gateway_res.json()["action"] == "END"
+        assert "not registered yet" in gateway_res.json()["message"]
