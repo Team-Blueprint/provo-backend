@@ -8,9 +8,31 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.enums import DayStatus, JobStatus
-from app.db.models import Consent, Job, PayerToken, User
+from app.core.security import compute_hmac_sha256
+from app.db.models import Consent, Job, JobDay, PayerToken, User
 from app.domain.scoring import DayScoreInput, calculate_worker_score
+
+
+def mask_employer_name(full_name: str | None, hash_suffix: str) -> str:
+    """
+    Masks employer full name to protect consumer PII while preserving recognition:
+    e.g. 'Chief Babatunde Adeleke' -> 'C***f B*******e (#81C0)'
+    """
+    if not full_name or not full_name.strip():
+        return f"Client (#{hash_suffix})"
+
+    words = full_name.strip().split()
+    masked_words = []
+    for w in words:
+        if len(w) <= 2:
+            masked_words.append(w[0] + "*")
+        else:
+            masked_words.append(w[0] + ("*" * (len(w) - 2)) + w[-1])
+
+    masked_str = " ".join(masked_words)
+    return f"{masked_str} (#{hash_suffix})"
 
 
 class ReportService:
@@ -110,17 +132,27 @@ class ReportService:
         if not worker:
             return None
 
-        # Fetch all funded/completed jobs for this worker with their days
+        # Fetch all funded, in-progress, or completed jobs for this worker (including multi-worker JobDay rows)
         jobs_stmt = (
             select(Job)
+            .outerjoin(JobDay, JobDay.job_id == Job.id)
             .where(
-                Job.worker_id == worker.id,
-                Job.status.in_([JobStatus.FUNDED.value, JobStatus.COMPLETED.value]),
+                (Job.worker_id == worker.id) | (JobDay.worker_id == worker.id),
+                Job.status.in_([
+                    JobStatus.FUNDED.value,
+                    JobStatus.IN_PROGRESS.value,
+                    JobStatus.COMPLETED.value,
+                ]),
             )
-            .options(selectinload(Job.days_schedule))
+            .distinct()
+            .options(
+                selectinload(Job.days_schedule),
+                selectinload(Job.client),
+                selectinload(Job.supervisor),
+            )
             .order_by(Job.created_at.desc())
         )
-        jobs = (await db.execute(jobs_stmt)).scalars().all()
+        jobs = list((await db.execute(jobs_stmt)).scalars().all())
 
         # Pre-calculate client job counts to identify new payers across system
         client_ids = {j.client_id for j in jobs}
@@ -131,20 +163,28 @@ class ReportService:
             ).scalar() or 0
             client_job_counts[c_id] = count
 
-        # Build scoring inputs and payer statistics
+        # Build scoring inputs, itemized jobs list, and payer statistics
         day_inputs: list[DayScoreInput] = []
         payer_map: dict[str, dict[str, Any]] = {}
+        jobs_list: list[dict[str, Any]] = []
         total_earned_kobo = 0
         total_settled_days = 0
 
         for job in jobs:
             payer_token = await self.get_or_create_payer_token(db, job.client_id, worker.id)
+            seed = f"{job.client_id}-{worker.id}"
+            hash_suffix = hashlib.sha256(seed.encode()).hexdigest()[:4].upper()
+            masked_client_name = mask_employer_name(job.client.name if job.client else None, hash_suffix)
+
             if payer_token not in payer_map:
                 payer_map[payer_token] = {
                     "token": payer_token,
+                    "masked_name": masked_client_name,
                     "jobs_count": 0,
                     "days_settled": 0,
                     "amount_kobo": 0,
+                    "confirmed_days": 0,
+                    "auto_released_days": 0,
                 }
             payer_map[payer_token]["jobs_count"] += 1
 
@@ -154,11 +194,46 @@ class ReportService:
                 or job.funding_reference.startswith("PW-CASH")
             )
 
-            for day in job.days_schedule:
+            # Filter milestones relevant to this specific worker
+            worker_days = [
+                d for d in job.days_schedule
+                if (d.worker_id == worker.id) or (d.worker_id is None and job.worker_id == worker.id)
+            ]
+
+            formatted_days = []
+            for day in sorted(worker_days, key=lambda x: x.day_number):
                 status_enum = DayStatus(day.status)
+                # Resolve outcome: client | supervisor | auto | pending | disputed
+                is_auto = (
+                    status_enum in (DayStatus.PAID, DayStatus.CONFIRMED, DayStatus.AUTO_RELEASED)
+                    and day.release_at is not None
+                    and day.decided_by is None
+                )
+                if is_auto:
+                    outcome = "auto"
+                elif day.decided_by is not None:
+                    if job.supervisor_id is not None and day.decided_by == job.supervisor_id:
+                        outcome = "supervisor"
+                    else:
+                        outcome = "client"
+                elif status_enum in (DayStatus.PAID, DayStatus.CONFIRMED):
+                    outcome = "client"
+                elif status_enum == DayStatus.DISPUTED:
+                    outcome = "disputed"
+                else:
+                    outcome = "pending"
+
+                formatted_days.append({
+                    "day_number": day.day_number,
+                    "amount_kobo": day.amount_kobo,
+                    "status": day.status,
+                    "outcome": outcome,
+                    "done_at": day.done_at.isoformat() if day.done_at else None,
+                    "release_at": day.release_at.isoformat() if day.release_at else None,
+                })
+
                 # Only count paid/disputed/active settled days in score
                 if status_enum in (DayStatus.PAID, DayStatus.DISPUTED):
-                    is_auto = (day.release_at is not None and day.decided_by is None)
                     day_inputs.append(
                         DayScoreInput(
                             job_id=str(job.id),
@@ -176,6 +251,23 @@ class ReportService:
                         total_settled_days += 1
                         payer_map[payer_token]["days_settled"] += 1
                         payer_map[payer_token]["amount_kobo"] += day.amount_kobo
+                        if is_auto:
+                            payer_map[payer_token]["auto_released_days"] += 1
+                        else:
+                            payer_map[payer_token]["confirmed_days"] += 1
+
+            worker_total_kobo = sum(d.amount_kobo for d in worker_days) if worker_days else job.total_kobo
+            jobs_list.append({
+                "job_id": str(job.id),
+                "client_token": masked_client_name,
+                "trade": job.trade,
+                "description": job.description,
+                "status": job.status,
+                "total_kobo": worker_total_kobo,
+                "days_count": len(worker_days),
+                "created_at": job.created_at.isoformat() if job.created_at else now.isoformat(),
+                "days": formatted_days,
+            })
 
         # Execute pure credit scoring engine
         score_result = calculate_worker_score(day_inputs)
@@ -186,6 +278,37 @@ class ReportService:
             round(max_payer_amount / total_earned_kobo, 3) if total_earned_kobo > 0 else 0.0
         )
         concentration_flag = concentration_ratio > 0.35
+
+        # Monthly chronological earnings timeline
+        monthly_map: dict[str, dict[str, Any]] = {}
+        for d_in in day_inputs:
+            if d_in.status == DayStatus.PAID:
+                ym = d_in.date.strftime("%Y-%m")
+                if ym not in monthly_map:
+                    monthly_map[ym] = {
+                        "month": ym,
+                        "label": d_in.date.strftime("%b %Y"),
+                        "confirmed_days": 0,
+                        "total_kobo": 0,
+                    }
+                monthly_map[ym]["confirmed_days"] += 1
+                monthly_map[ym]["total_kobo"] += d_in.amount_kobo
+
+        active_months = [monthly_map[k] for k in sorted(monthly_map.keys())]
+
+        # Cryptographically signed snapshot
+        signed_at = now.isoformat()
+        snapshot_payload = f"{worker.id}:{score_result.band}:{score_result.score}:{signed_at}"
+        secret = settings.PROOFWORK_HMAC_SECRET or "proofwork-default-hmac-secret"
+        signature = compute_hmac_sha256(secret, snapshot_payload)
+        signed_snapshot = {
+            "worker_id": str(worker.id),
+            "standing_tier": score_result.band,
+            "standing_score": score_result.score,
+            "signals": score_result.reasons,
+            "signed_at": signed_at,
+            "signature": signature,
+        }
 
         profile = worker.worker_profile
         trade = profile.trade if profile else "Artisan"
@@ -227,4 +350,7 @@ class ReportService:
                 "exceeds_35_percent_concentration": concentration_flag,
                 "payers": list(payer_map.values()),
             },
+            "jobs": jobs_list,
+            "active_months": active_months,
+            "signed_snapshot": signed_snapshot,
         }

@@ -118,7 +118,7 @@ async def test_worker_directory_and_lender_report_flow():
         consent_token = share_data["token"]
         assert "reports/" in share_data["report_url"]
 
-        # 4. Lender accesses verified report (JSON)
+        # 4. Lender accesses verified report (JSON) via native /reports/{token}
         report_res = await client.get(f"/reports/{consent_token}")
         assert report_res.status_code == 200
         report = report_res.json()
@@ -127,9 +127,54 @@ async def test_worker_directory_and_lender_report_flow():
         assert report["credit_score"]["score"] > 0
         assert report["earnings_summary"]["total_settled_days"] == 2
         assert len(report["payer_diversity"]["payers"]) == 1
-        # Check tokenized client pseudonym
-        payer_id = report["payer_diversity"]["payers"][0]["token"]
-        assert payer_id.startswith("Client-")
+
+        # Check payer diversity fields
+        payer_item = report["payer_diversity"]["payers"][0]
+        assert payer_item["token"].startswith("Client-")
+        assert "masked_name" in payer_item
+        assert "(#" in payer_item["masked_name"]
+        assert payer_item["confirmed_days"] == 2
+        assert payer_item["auto_released_days"] == 0
+
+        # Check jobs array
+        assert "jobs" in report
+        assert len(report["jobs"]) >= 1
+        job_item = report["jobs"][0]
+        assert "job_id" in job_item
+        assert "client_token" in job_item
+        assert "trade" in job_item
+        assert "description" in job_item
+        assert "status" in job_item
+        assert "total_kobo" in job_item
+        assert "days_count" in job_item
+        assert "created_at" in job_item
+        assert len(job_item["days"]) == 2
+        assert job_item["days"][0]["outcome"] == "client"
+
+        # Check active_months
+        assert "active_months" in report
+        assert len(report["active_months"]) >= 1
+        month_item = report["active_months"][0]
+        assert "month" in month_item
+        assert "label" in month_item
+        assert "confirmed_days" in month_item
+        assert "total_kobo" in month_item
+
+        # Check signed_snapshot
+        assert "signed_snapshot" in report
+        snapshot = report["signed_snapshot"]
+        assert snapshot["worker_id"] == str(worker_id)
+        assert "standing_tier" in snapshot
+        assert "standing_score" in snapshot
+        assert "signals" in snapshot
+        assert "signed_at" in snapshot
+        assert "signature" in snapshot
+        assert len(snapshot["signature"]) == 64  # SHA-256 hex length
+
+        # 4b. Verify /api/reports/{token} alias returns identical response
+        api_report_res = await client.get(f"/api/reports/{consent_token}")
+        assert api_report_res.status_code == 200
+        assert api_report_res.json()["signed_snapshot"]["standing_score"] == snapshot["standing_score"]
 
         # 5. Access Web Views (HTML)
         web_checkout = await client.get(f"/checkout/{job_id}")
