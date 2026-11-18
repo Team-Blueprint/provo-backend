@@ -742,7 +742,7 @@ async def set_pin_page(phone: str | None = None):
                 validatedPhone = phone;
                 document.getElementById('step1').style.display = 'none';
                 document.getElementById('step2').style.display = 'block';
-                showMsg('step2Msg', 'info', 'Verification code sent to ' + phone + (data.otp_code ? ' (Code: ' + data.otp_code + ')' : ''));
+                showMsg('step2Msg', 'info', 'Verification code sent to ' + phone);
             }} else {{
                 btn.disabled = false;
                 showMsg('step1Msg', 'error', data.detail || 'Could not send verification code.');

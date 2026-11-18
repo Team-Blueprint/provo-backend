@@ -32,10 +32,9 @@ async def signup(
     """
     Unified Signup with 6-Digit PIN:
     Registers a new worker or employer profile with a security PIN and dispatches a 6-digit OTP via SMS.
-    Returns the otp_code in response for immediate testing convenience.
     """
     try:
-        _otp, otp_code = await auth_service.request_signup(
+        _otp, _otp_code = await auth_service.request_signup(
             db=db,
             name=payload.name,
             phone=payload.phone,
@@ -47,7 +46,6 @@ async def signup(
             phone=payload.phone,
             message="Verification code sent via SMS.",
             expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
-            otp_code=otp_code,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -92,12 +90,11 @@ async def resend_otp(
     Dispatches a fresh OTP if the previous code expired before verification.
     """
     try:
-        _otp, otp_code = await auth_service.resend_otp(db=db, phone=payload.phone)
+        _otp, _otp_code = await auth_service.resend_otp(db=db, phone=payload.phone)
         return OTPResponse(
             phone=payload.phone,
             message="Fresh verification code dispatched via SMS.",
             expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
-            otp_code=otp_code,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -114,12 +111,11 @@ async def request_set_pin(
     Only works if the account was created via Telegram and has no PIN yet.
     """
     try:
-        _otp, otp_code = await auth_service.request_set_pin_otp(db=db, phone=payload.phone)
+        _otp, _otp_code = await auth_service.request_set_pin_otp(db=db, phone=payload.phone)
         return OTPResponse(
             phone=payload.phone,
             message="PIN setup OTP sent via SMS.",
             expires_in_minutes=settings.OTP_EXPIRE_MINUTES,
-            otp_code=otp_code,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

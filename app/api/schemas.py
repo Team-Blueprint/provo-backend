@@ -42,7 +42,6 @@ class OTPResponse(BaseModel):
     phone: str
     message: str
     expires_in_minutes: int
-    otp_code: str | None = Field(None, description="OTP code included for convenience during development/testing")
 
 
 class TokenResponse(BaseModel):

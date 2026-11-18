@@ -176,6 +176,9 @@ def job_days_picker_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="3 Days", callback_data="create_job_days:3"),
             InlineKeyboardButton(text="5 Days", callback_data="create_job_days:5"),
         ],
+        [
+            InlineKeyboardButton(text="✏️ Custom (Enter Days)", callback_data="create_job_days:custom"),
+        ],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="create_job_cancel")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)

@@ -74,15 +74,21 @@ async def handle_start(message: Message) -> None:
 
     # Check for supervisor deep-link token in /start arg (e.g. /start sup_<token> or /start supervisor_<token>)
     parts = message.text.split(maxsplit=1) if message.text else []
+    candidates = []
     if len(parts) > 1:
         raw_arg = parts[1].strip()
-        candidates = [raw_arg]
+        candidates.append(raw_arg)
         if raw_arg.startswith("supervisor_"):
             candidates.append(raw_arg[11:])
             candidates.append(f"sup_{raw_arg[11:]}")
         elif raw_arg.startswith("sup_"):
             candidates.append(raw_arg[4:])
+            if raw_arg.startswith("sup_sup_"):
+                candidates.append(raw_arg[4:])
+        else:
+            candidates.append(f"sup_{raw_arg}")
 
+    if candidates:
         async with async_session_factory() as session:
             stmt = (
                 select(Job)
@@ -140,12 +146,12 @@ async def handle_start(message: Message) -> None:
         if user:
             if user.is_worker:
                 await message.answer(
-                    f"Welcome back, {user.name}! 🔨\nHere is your Artisan dashboard.",
+                    f"Welcome back, {user.name}! 🔨\nHere is your Artisan Dashboard.",
                     reply_markup=worker_main_menu(),
                 )
             else:
                 await message.answer(
-                    f"Welcome back, {user.name}! 💼\nHere is your employer dashboard.",
+                    f"Welcome back, {user.name}! 💼\nHere is your Employer Dashboard.",
                     reply_markup=client_main_menu(),
                 )
             return
@@ -267,7 +273,7 @@ async def handle_role_selection(query: CallbackQuery) -> None:
             if not user.pin_hash:
                 await query.message.answer(
                     "🔐 *Set Your Web PIN (Optional)*\n\n"
-                    "To also access Proofwork on the web, you'll need a 6-digit PIN. "
+                    "To also access Provo on the web, you'll need a 6-digit PIN. "
                     "You won't type it here — tap the button below to set it on a secure page:\n\n"
                     "_(You can skip this and do it later via /setpin)_",
                     parse_mode="Markdown",
@@ -308,7 +314,7 @@ async def handle_trade_selection(query: CallbackQuery) -> None:
     if user and not user.pin_hash:
         await query.message.answer(
             "🔐 *Set Your Web PIN (Optional)*\n\n"
-            "To also access Proofwork on the web, you'll need a 6-digit PIN. "
+            "To also access Provo on the web, you'll need a 6-digit PIN. "
             "You won't type it here — tap the button below to set it on a secure page:\n\n"
             "_(You can skip this and do it later via /setpin)_",
             parse_mode="Markdown",
@@ -340,7 +346,7 @@ async def handle_setpin_command(message: Message) -> None:
         await message.answer(
             f"🔐 *Web PIN Setup*\n\n"
             f"PIN status: *{status_text}*\n\n"
-            "Tap below to set or update your 6-digit PIN on the secure Proofwork web page:\n\n"
+            "Tap below to set or update your 6-digit PIN on the secure Provo web page:\n\n"
             "_(Your PIN is never entered directly in Telegram for maximum security)_",
             parse_mode="Markdown",
             reply_markup=set_pin_keyboard(user.phone),
@@ -1184,8 +1190,19 @@ async def process_job_description(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(CreateJobStates.days, F.data.startswith("create_job_days:"))
 async def process_job_days_button(query: CallbackQuery, state: FSMContext) -> None:
-    """Handles quick duration button press."""
-    days = int(query.data.split(":")[1])
+    """Handles quick duration button press or custom button prompt."""
+    val = query.data.split(":")[1]
+    if val == "custom":
+        if query.message:
+            await query.message.answer(
+                "✏️ *Enter Custom Duration*\n\n"
+                "Please type the number of days this job will take (e.g. `7`, `14`, `30`):",
+                parse_mode="Markdown",
+            )
+        await query.answer()
+        return
+
+    days = int(val)
     await state.update_data(days=days)
     await state.set_state(CreateJobStates.total_amount)
 
@@ -1204,7 +1221,10 @@ async def process_job_days_text(message: Message, state: FSMContext) -> None:
     """Handles manual number of days input."""
     text = message.text.strip() if message.text else ""
     if not text.isdigit() or int(text) < 1 or int(text) > 365:
-        await message.answer("Please enter a valid number of days between 1 and 365.")
+        await message.answer(
+            "Please enter a valid number of days between 1 and 365 (e.g. `7`, `14`, or `30`).",
+            parse_mode="Markdown",
+        )
         return
 
     days = int(text)
@@ -1333,23 +1353,21 @@ async def _finalize_job_creation(
         job = (await session.execute(stmt)).scalar_one()
 
         worker_display = f"{job.worker.name} ({job.worker.phone})" if job.worker else "Not yet assigned (Assign later)"
-        supervisor_display = job.supervisor_name or "None assigned (Assign later)"
         amount_naira = kobo_to_naira_str(job.total_kobo)
         account_num = job.paga_account_number or "Pending..."
 
         summary_text = (
-            f"🎉 *Escrow Job Created Successfully!*\n\n"
+            f"🎉 *Job Created Successfully!*\n\n"
             f"• *Trade:* {job.trade}\n"
             f"• *Description:* {job.description}\n"
             f"• *Duration:* {job.days} Day(s)\n"
             f"• *Total Escrow:* *{amount_naira}*\n"
             f"• *Artisan:* {worker_display}\n"
-            f"• *Supervisor:* {supervisor_display}\n"
             f"• *Status:* `{job.status}`\n\n"
-            f"🏦 *Bank Transfer Escrow Details:*\n"
+            f"🏦 *Bank Transfer Details:*\n"
             f"• *Bank:* `Paga`\n"
             f"• *Account Number:* `{account_num}`\n\n"
-            f"💡 _Transfer to the account above or tap 'Simulate Escrow Deposit' below to lock funds instantly!_"
+            f"💡 _Transfer to the account above or tap 'Simulate Deposit' below to lock funds instantly!_"
         )
         return job, summary_text
 
@@ -1385,8 +1403,6 @@ async def process_artisan_choice(query: CallbackQuery, state: FSMContext) -> Non
                 str(job.id),
                 job.paga_account_number,
                 show_assign_worker=(job.worker_id is None),
-                show_assign_supervisor=(job.supervisor_name is None),
-                supervisor_token=job.supervisor_token,
             ),
         )
     await query.answer("Job created!")
@@ -1439,7 +1455,5 @@ async def process_manual_artisan_phone(message: Message, state: FSMContext) -> N
             str(job.id),
             job.paga_account_number,
             show_assign_worker=(job.worker_id is None),
-            show_assign_supervisor=(job.supervisor_name is None),
-            supervisor_token=job.supervisor_token,
         ),
     )
