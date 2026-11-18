@@ -14,6 +14,8 @@ class DayScoreInput:
     status: DayStatus
     date: datetime
     client_is_new_to_system: bool = False
+    is_cash: bool = False
+    is_auto_released: bool = False
 
 
 @dataclass(frozen=True)
@@ -29,21 +31,25 @@ class WorkerScoreResult:
     repeat_payers: int
     active_months: int
     auto_release_ratio: float
+    circular_flow_detected: bool = False
+    cash_days: int = 0
 
 
-def calculate_worker_score(history: list[DayScoreInput]) -> WorkerScoreResult:
+def calculate_worker_score(
+    history: list[DayScoreInput],
+    circular_payer_ids: set[str] | None = None,
+) -> WorkerScoreResult:
     """
     Pure scoring function evaluating an artisan's credit readiness.
-    Rules (from Proofwork 16 Nov 2026 spec):
+    Rules:
     1. Base verification: 15 points if at least one confirmed/auto-released day exists.
-    2. Confirmed days count in full (2 pts each, up to 25 pts).
-    3. Auto-released days count at lower weight (1 pt each, up to 10 pts).
-    4. Disputed days count for zero.
-    5. Unique verified payers: +8 pts per unique payer (up to 24 pts).
-    6. Repeat clients (>= 2 jobs): +12 pts per repeat client (up to 24 pts).
-    7. Active earning months: +5 pts per month (up to 15 pts).
-    8. Single-payer cap: No single client can supply more than 35% of the points.
-    9. Down-weight new payers with no prior system history.
+    2. Count unique confirmed payers instead of raw payments (8 pts per unique payer, max 24 pts).
+    3. Weight repeat clients with multiple distinct completed jobs (12 pts per repeat client, max 24 pts).
+    4. Flag payments that circle between the same few accounts (-20 pts penalty and warning).
+    5. Give less weight (30% discount / 0.7x) to payers with no other history in the system.
+    6. Cap the share of cash jobs at 20% of total work milestone points.
+    7. Single-payer cap: No single client can supply more than 35% of work points.
+    8. Auto-released days count at discounted weight (1 pt vs 2 pts for active confirmation).
     """
     if not history:
         return WorkerScoreResult(
@@ -58,33 +64,64 @@ def calculate_worker_score(history: list[DayScoreInput]) -> WorkerScoreResult:
             repeat_payers=0,
             active_months=0,
             auto_release_ratio=0.0,
+            circular_flow_detected=False,
+            cash_days=0,
         )
 
     reasons: list[str] = []
     confirmed_days = 0
     auto_released_days = 0
     disputed_days = 0
+    cash_days_count = 0
 
     payer_job_map: dict[str, set[str]] = defaultdict(set)
-    payer_points: dict[str, float] = defaultdict(float)
+    payer_escrow_points: dict[str, float] = defaultdict(float)
+    payer_cash_points: dict[str, float] = defaultdict(float)
     active_months_set: set[str] = set()
 
+    circular_set = circular_payer_ids or set()
+    circular_detected = False
+    new_payer_discount_applied = False
+
     for item in history:
-        # Check valid day status
-        if item.status in (DayStatus.CONFIRMED, DayStatus.PAID):
+        if item.is_cash:
+            cash_days_count += 1
+
+        if item.client_id in circular_set:
+            circular_detected = True
+
+        is_auto = (item.status == DayStatus.AUTO_RELEASED) or item.is_auto_released
+
+        if is_auto:
+            auto_released_days += 1
+            pts = 1.0  # Silence is not confirmation (discounted)
+            if item.client_is_new_to_system:
+                pts *= 0.7
+                new_payer_discount_applied = True
+
+            if item.is_cash:
+                payer_cash_points[item.client_id] += pts
+            else:
+                payer_escrow_points[item.client_id] += pts
+
+            payer_job_map[item.client_id].add(item.job_id)
+            active_months_set.add(item.date.strftime("%Y-%m"))
+
+        elif item.status in (DayStatus.CONFIRMED, DayStatus.PAID):
             confirmed_days += 1
             pts = 2.0
             if item.client_is_new_to_system:
-                pts *= 0.8  # Down-weight new single-job payers
-            payer_points[item.client_id] += pts
+                pts *= 0.7  # 30% discount for payers with no other system history
+                new_payer_discount_applied = True
+
+            if item.is_cash:
+                payer_cash_points[item.client_id] += pts
+            else:
+                payer_escrow_points[item.client_id] += pts
+
             payer_job_map[item.client_id].add(item.job_id)
             active_months_set.add(item.date.strftime("%Y-%m"))
-        elif item.status == DayStatus.AUTO_RELEASED:
-            auto_released_days += 1
-            pts = 1.0  # Silence is not confirmation (discounted)
-            payer_points[item.client_id] += pts
-            payer_job_map[item.client_id].add(item.job_id)
-            active_months_set.add(item.date.strftime("%Y-%m"))
+
         elif item.status == DayStatus.DISPUTED:
             disputed_days += 1
             # Disputed days count for zero
@@ -103,47 +140,79 @@ def calculate_worker_score(history: list[DayScoreInput]) -> WorkerScoreResult:
             repeat_payers=0,
             active_months=0,
             auto_release_ratio=0.0,
+            circular_flow_detected=circular_detected,
+            cash_days=cash_days_count,
         )
 
     base_score = 15.0
     reasons.append("Base verified escrow score: +15 pts")
 
-    # Enforce single payer cap (max 35% of total points from any single payer)
-    raw_payer_sum = sum(payer_points.values())
-    max_single_allowed = raw_payer_sum * 0.35 if raw_payer_sum > 0 else 0
-    capped_day_points = 0.0
+    if new_payer_discount_applied:
+        reasons.append("Milestone points for new/unproven employer(s) discounted by 30%.")
 
-    for client_id, pts in payer_points.items():
-        if raw_payer_sum > 25 and pts > max_single_allowed:
-            capped_day_points += max_single_allowed
+    # Combine payer points and enforce single-payer cap (max 35% from any single client)
+    all_client_ids = set(payer_escrow_points.keys()) | set(payer_cash_points.keys())
+    raw_escrow_total = sum(payer_escrow_points.values())
+    raw_cash_total = sum(payer_cash_points.values())
+    raw_total = raw_escrow_total + raw_cash_total
+
+    max_single_allowed = raw_total * 0.35 if raw_total > 0 else 0
+    capped_escrow_points = 0.0
+    capped_cash_points = 0.0
+
+    for client_id in all_client_ids:
+        client_escrow = payer_escrow_points.get(client_id, 0.0)
+        client_cash = payer_cash_points.get(client_id, 0.0)
+        client_pts = client_escrow + client_cash
+
+        if raw_total > 25 and client_pts > max_single_allowed:
+            ratio = max_single_allowed / client_pts
+            capped_escrow_points += client_escrow * ratio
+            capped_cash_points += client_cash * ratio
             reasons.append(f"Client {client_id[:8]} contributions capped at 35% limit.")
         else:
-            capped_day_points += pts
+            capped_escrow_points += client_escrow
+            capped_cash_points += client_cash
 
-    day_score = min(capped_day_points, 35.0)
+    # Cap the share of cash jobs at 20% of work milestone score
+    # Cash points cannot exceed 25% of escrow points (so cash is at most 20% of total)
+    max_cash_allowed = capped_escrow_points * 0.25 if capped_escrow_points > 0 else 0.0
+    if capped_cash_points > max_cash_allowed:
+        reasons.append(f"Cash job contribution capped at 20% limit (excess {round(capped_cash_points - max_cash_allowed, 1)} pts excluded).")
+        effective_cash_points = max_cash_allowed
+    else:
+        effective_cash_points = capped_cash_points
+
+    day_score = min(capped_escrow_points + effective_cash_points, 35.0)
     reasons.append(
         f"Work days score: +{round(day_score, 1)} pts ({confirmed_days} confirmed, {auto_released_days} auto-released)"
     )
 
-    # Unique payers score (up to 24 pts)
+    # 1. Unique confirmed payers score (count unique confirmed payers instead of raw payments, max 24 pts)
     unique_payers = len(payer_job_map)
     payer_score = min(unique_payers * 8.0, 24.0)
     reasons.append(f"{unique_payers} unique verified payer(s): +{payer_score} pts")
 
-    # Repeat clients score (up to 24 pts)
+    # 2. Repeat clients score (clients with >= 2 distinct completed jobs, max 24 pts)
     repeat_payers = sum(1 for jobs in payer_job_map.values() if len(jobs) >= 2)
     repeat_score = min(repeat_payers * 12.0, 24.0)
     if repeat_payers > 0:
         reasons.append(f"{repeat_payers} repeat client(s) with multiple jobs: +{repeat_score} pts")
 
-    # Active months score (up to 15 pts)
+    # 3. Active months score (up to 15 pts)
     active_months = len(active_months_set)
     months_score = min(active_months * 5.0, 15.0)
     reasons.append(f"{active_months} active earning month(s): +{months_score} pts")
 
+    # 4. Circular payment deduction
+    circular_penalty = 0.0
+    if circular_detected:
+        circular_penalty = 20.0
+        reasons.append("⚠️ CIRCULAR_FLOW_DETECTED: Payments circling between related accounts detected (-20 pts penalty).")
+
     # Total score calculation
-    total_score = round(base_score + day_score + payer_score + repeat_score + months_score)
-    total_score = max(0, min(total_score, 100))
+    raw_score = base_score + day_score + payer_score + repeat_score + months_score - circular_penalty
+    total_score = round(max(0, min(raw_score, 100)))
 
     # Auto-release proportion alert
     auto_release_ratio = (auto_released_days / total_valid_days) if total_valid_days > 0 else 0.0
@@ -174,4 +243,6 @@ def calculate_worker_score(history: list[DayScoreInput]) -> WorkerScoreResult:
         repeat_payers=repeat_payers,
         active_months=active_months,
         auto_release_ratio=round(auto_release_ratio, 2),
+        circular_flow_detected=circular_detected,
+        cash_days=cash_days_count,
     )

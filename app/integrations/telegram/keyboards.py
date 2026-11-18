@@ -196,7 +196,7 @@ def assign_artisan_picker_keyboard(artisans: list[dict[str, str]], job_id: str) 
     """Lists trade-matched artisans with one-tap selection, plus manual phone option for existing job."""
     buttons = []
     for a in artisans:
-        label = f"👷 {a['name']} • {a['area']} ({a['badge']})"
+        label = f"👷 {a['name']} • {a['area']}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"assign_artisan_pick:{job_id}:{a['user_id']}")])
 
     buttons.append([InlineKeyboardButton(text="📱 Enter Phone Number", callback_data=f"assign_artisan_manual:{job_id}")])
@@ -208,7 +208,7 @@ def artisan_picker_keyboard(artisans: list[dict[str, str]]) -> InlineKeyboardMar
     """Lists trade-matched artisans with one-tap selection, plus phone/skip options."""
     buttons = []
     for a in artisans:
-        label = f"👷 {a['name']} • {a['area']} ({a['badge']})"
+        label = f"👷 {a['name']} • {a['area']}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_artisan:{a['user_id']}")])
 
     buttons.append([InlineKeyboardButton(text="📱 Enter Different Phone Number", callback_data="choose_artisan:manual")])

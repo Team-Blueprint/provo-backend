@@ -287,7 +287,10 @@ class AuthService:
 
         # Send via SMS
         msg = f"Your Provo verification code is {raw_code}. Valid for {settings.OTP_EXPIRE_MINUTES} minutes."
-        await self.sms_client.send_sms(to_phone=phone, message=msg)
+        try:
+            await self.sms_client.send_sms(to_phone=phone, message=msg)
+        except Exception as e:
+            logger.error("SMS dispatch failure for %s: %s", phone, e)
         return otp_record, raw_code
 
     async def verify_otp(

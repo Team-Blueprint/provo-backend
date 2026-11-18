@@ -158,7 +158,6 @@ class WorkerDirectoryItem(BaseModel):
     trade: str
     area: str
     verified_days_count: int
-    badge_grade: str
     paga_account_number: str | None = None
     paga_payment_url: str | None = None
 

@@ -30,7 +30,7 @@ async def list_available_workers(
 ) -> list[WorkerDirectoryItem]:
     """
     Public directory of registered artisans available for hire.
-    Returns anonymized professional metrics (verified days, badge grade) without leaking personal PII.
+    Returns anonymized professional metrics (verified days) without leaking personal PII.
     """
     stmt = (
         select(WorkerProfile)
@@ -61,16 +61,6 @@ async def list_available_workers(
         )
         verified_days = (await db.execute(count_stmt)).scalar() or 0
 
-        # Assign badge grade
-        if verified_days >= 30:
-            badge = "GOLD_VERIFIED"
-        elif verified_days >= 10:
-            badge = "SILVER_VERIFIED"
-        elif verified_days >= 1:
-            badge = "BRONZE_VERIFIED"
-        else:
-            badge = "UNVERIFIED"
-
         results.append(
             WorkerDirectoryItem(
                 id=user.id,
@@ -78,7 +68,6 @@ async def list_available_workers(
                 trade=prof.trade,
                 area=prof.area,
                 verified_days_count=verified_days,
-                badge_grade=badge,
                 paga_account_number=prof.paga_account_number,
                 paga_payment_url=prof.paga_payment_url,
             )

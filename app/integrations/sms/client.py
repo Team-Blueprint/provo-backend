@@ -48,9 +48,34 @@ class SMSClient:
             "to": clean_phone,
         }
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(url, json=body, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            logger.info("Sent SMS to %s via httpSMS (id=%s)", clean_phone, data.get("data", {}).get("id"))
-            return data.get("data", {})
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, json=body, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                logger.info("Sent SMS to %s via httpSMS (id=%s)", clean_phone, data.get("data", {}).get("id"))
+                return data.get("data", {})
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "httpSMS API error %s for %s: %s",
+                e.response.status_code,
+                clean_phone,
+                e.response.text,
+            )
+            # Log content for local dev / demo debugging so signup is never blocked by exhausted SMS credits
+            logger.warning("[FALLBACK SIMULATED SMS] To: %s | Content: %s", clean_phone, message)
+            return {
+                "id": f"fallback-sms-{uuid.uuid4().hex[:12]}",
+                "status": "failed_provider",
+                "simulated": True,
+                "error": str(e),
+            }
+        except Exception as e:
+            logger.error("Failed to send SMS to %s: %s", clean_phone, e)
+            logger.warning("[FALLBACK SIMULATED SMS] To: %s | Content: %s", clean_phone, message)
+            return {
+                "id": f"fallback-sms-{uuid.uuid4().hex[:12]}",
+                "status": "failed_network",
+                "simulated": True,
+                "error": str(e),
+            }

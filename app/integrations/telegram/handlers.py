@@ -483,18 +483,10 @@ async def handle_assign_artisan_start(query: CallbackQuery, state: FSMContext) -
             u = prof.user
             if not u:
                 continue
-            count_stmt = (
-                select(func.count(JobDay.id))
-                .join(Job, JobDay.job_id == Job.id)
-                .where(Job.worker_id == u.id, JobDay.status == DayStatus.PAID.value)
-            )
-            v_days = (await session.execute(count_stmt)).scalar() or 0
-            badge = "⭐ Gold" if v_days >= 30 else ("⭐ Silver" if v_days >= 10 else ("⭐ Bronze" if v_days >= 1 else "Unverified"))
             artisan_list.append({
                 "user_id": str(u.id),
                 "name": u.name,
                 "area": prof.area,
-                "badge": badge,
             })
 
     if artisan_list:
@@ -893,6 +885,14 @@ async def handle_my_record(message: Message) -> None:
         )
         days = list((await session.execute(day_stmt)).scalars().all())
 
+        client_ids = {d.job.client_id for d in days if d.job}
+        client_job_counts = {}
+        for c_id in client_ids:
+            count = (
+                await session.execute(select(func.count(Job.id)).where(Job.client_id == c_id))
+            ).scalar() or 0
+            client_job_counts[c_id] = count
+
         history = [
             DayScoreInput(
                 job_id=str(d.job_id),
@@ -900,6 +900,12 @@ async def handle_my_record(message: Message) -> None:
                 amount_kobo=d.amount_kobo,
                 status=DayStatus(d.status),
                 date=d.done_at or d.created_at,
+                is_auto_released=(d.release_at is not None and d.decided_by is None),
+                is_cash=(
+                    d.job.funding_reference.startswith("CASH")
+                    or d.job.funding_reference.startswith("PW-CASH")
+                ),
+                client_is_new_to_system=(client_job_counts.get(d.job.client_id, 0) <= 1),
             )
             for d in days
         ]
@@ -1274,20 +1280,10 @@ async def process_job_total_amount(message: Message, state: FSMContext) -> None:
             if not u:
                 continue
 
-            # Count paid days
-            count_stmt = (
-                select(func.count(JobDay.id))
-                .join(Job, JobDay.job_id == Job.id)
-                .where(Job.worker_id == u.id, JobDay.status == DayStatus.PAID.value)
-            )
-            v_days = (await session.execute(count_stmt)).scalar() or 0
-            badge = "⭐ Gold" if v_days >= 30 else ("⭐ Silver" if v_days >= 10 else ("⭐ Bronze" if v_days >= 1 else "Unverified"))
-
             artisan_list.append({
                 "user_id": str(u.id),
                 "name": u.name,
                 "area": prof.area,
-                "badge": badge,
             })
 
     if artisan_list:

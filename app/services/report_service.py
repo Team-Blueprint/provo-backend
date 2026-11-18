@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -122,6 +122,15 @@ class ReportService:
         )
         jobs = (await db.execute(jobs_stmt)).scalars().all()
 
+        # Pre-calculate client job counts to identify new payers across system
+        client_ids = {j.client_id for j in jobs}
+        client_job_counts: dict[uuid.UUID, int] = {}
+        for c_id in client_ids:
+            count = (
+                await db.execute(select(func.count(Job.id)).where(Job.client_id == c_id))
+            ).scalar() or 0
+            client_job_counts[c_id] = count
+
         # Build scoring inputs and payer statistics
         day_inputs: list[DayScoreInput] = []
         payer_map: dict[str, dict[str, Any]] = {}
@@ -139,10 +148,17 @@ class ReportService:
                 }
             payer_map[payer_token]["jobs_count"] += 1
 
+            client_is_new = client_job_counts.get(job.client_id, 0) <= 1
+            is_cash_job = (
+                job.funding_reference.startswith("CASH")
+                or job.funding_reference.startswith("PW-CASH")
+            )
+
             for day in job.days_schedule:
                 status_enum = DayStatus(day.status)
                 # Only count paid/disputed/active settled days in score
                 if status_enum in (DayStatus.PAID, DayStatus.DISPUTED):
+                    is_auto = (day.release_at is not None and day.decided_by is None)
                     day_inputs.append(
                         DayScoreInput(
                             job_id=str(job.id),
@@ -150,6 +166,9 @@ class ReportService:
                             amount_kobo=day.amount_kobo,
                             status=status_enum,
                             date=day.done_at or day.created_at,
+                            is_auto_released=is_auto,
+                            is_cash=is_cash_job,
+                            client_is_new_to_system=client_is_new,
                         )
                     )
                     if status_enum == DayStatus.PAID:
